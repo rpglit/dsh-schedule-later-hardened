@@ -11,4 +11,4 @@
 # dataDir would create a literally-named placeholder directory.
 - insert:
     - id: dsh-schedule-later
-      name: "dsh-schedule-later"
+      name: "dsh-schedule-later-hardened"

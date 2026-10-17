@@ -1,6 +1,7 @@
 MIT License
 
 Copyright (c) 2026 Adithya N Raj
+Copyright (c) 2026 rpglit (hardened fork)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -19,3 +20,14 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+---
+
+Provenance: this repository is a hardened fork of
+`adithyanraj03/dsh-schedule-later` (MIT, Copyright (c) 2026 Adithya N Raj)
+at version 0.6.0 (npm publish 2026-09-24; upstream dormant since), snapshot
+taken 2026-10-17. The hardened-fork contributions — the `src/scheduler.js`
+rewrite (INC-005), `test/regression.mjs`, the publish manifest, and the
+README provenance sections — are Copyright (c) 2026 rpglit (hardened fork).
+This repository is a third-party community fork, not affiliated with the
+upstream author.
