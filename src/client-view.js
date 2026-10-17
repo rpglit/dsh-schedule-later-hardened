@@ -1,0 +1,1910 @@
+// Browser view layer for dsh-schedule-later.
+// This file is CONCATENATED into lib/client.js by scripts/build-client.mjs
+// together with src/client-core.js — it must stay import/export-free plain JS.
+// Inside the bundle it references: React (platform module) and the client-core
+// helpers (sortTasks/collapseState/formatLocalTime/formatCountdown/…).
+
+/* ==== view ==== */
+function createClientPluginBody(React) {
+  const h = React.createElement;
+  const TOUCH_MIN = 40; // FIX 5: touch target height on mobile
+
+  /* --- motion ---------------------------------------------------------- */
+  // One stylesheet for every animation in the plugin, added once. Anything
+  // marked .dsl-motion stops moving when the OS asks for reduced motion.
+  const STYLE_ID = "dsh-schedule-later-motion";
+  const MOTION_CSS = [
+    "@keyframes dsl-sweep{to{transform:rotate(360deg)}}",
+    "@keyframes dsl-nudge{0%,100%{transform:rotate(0)}30%{transform:rotate(45deg)}65%{transform:rotate(-10deg)}}",
+    "@keyframes dsl-flip{0%,35%{transform:rotate(0)}50%,85%{transform:rotate(180deg)}100%{transform:rotate(360deg)}}",
+    "@keyframes dsl-twinkle{0%,100%{opacity:.25}50%{opacity:1}}",
+    "@keyframes dsl-pop{from{opacity:0;transform:translateY(6px) scale(.98)}to{opacity:1;transform:none}}",
+    "@keyframes dsl-glow{0%,100%{opacity:.5;transform:scale(1)}50%{opacity:.85;transform:scale(1.25)}}",
+    ".dsl-hand{transform-box:view-box;transform-origin:12px 14px}",
+    ".dsl-spin .dsl-hand{animation:dsl-sweep 2.4s linear infinite}",
+    ".dsl-slow .dsl-hand{animation:dsl-sweep 10s linear infinite}",
+    ".dsl-btn:hover .dsl-watch:not(.dsl-spin) .dsl-hand{animation:dsl-nudge .7s ease-in-out}",
+    ".dsl-flip{animation:dsl-flip 2.6s ease-in-out infinite;transform-origin:50% 50%}",
+    ".dsl-twinkle{animation:dsl-twinkle 2.4s ease-in-out infinite}",
+    ".dsl-pop{animation:dsl-pop .18s ease-out}",
+    ".dsl-glow{animation:dsl-glow 3s ease-in-out infinite;transform-box:fill-box;transform-origin:center}",
+    ".dsl-chip:hover{border-color:#3b82f6!important}",
+    ".dsl-row-act:hover{opacity:1!important;background:rgba(128,128,128,.18)!important}",
+    // A small label for icon-only buttons, drawn to the LEFT of the icon so
+    // it stays inside the row and is never clipped by the list's scroll box.
+    ".dsl-tip{position:relative}",
+    ".dsl-tip:hover::after,.dsl-tip:focus-visible::after{content:attr(data-tip);position:absolute;right:calc(100% + 6px);top:50%;transform:translateY(-50%);white-space:nowrap;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:600;line-height:18px;font-family:inherit;background:#2b2b30;color:#f2f2f2;border:1px solid rgba(255,255,255,.14);box-shadow:0 4px 12px rgba(0,0,0,.3);pointer-events:none;z-index:5}",
+    "@media (prefers-color-scheme: light){.dsl-tip:hover::after,.dsl-tip:focus-visible::after{background:#fff;color:#111;border-color:rgba(0,0,0,.12);box-shadow:0 4px 12px rgba(0,0,0,.12)}}",
+    // The in-chat list's scrollbar, in dsh's own style: a thin rounded thumb
+    // inset 2px on a clear track, no buttons.
+    ".dsl-dock-list::-webkit-scrollbar{width:8px}",
+    ".dsl-dock-list::-webkit-scrollbar-button{display:none;width:0;height:0}",
+    ".dsl-dock-list::-webkit-scrollbar-track{background:transparent}",
+    ".dsl-dock-list::-webkit-scrollbar-thumb{background-color:rgba(128,128,128,.4);border:2px solid transparent;background-clip:padding-box;border-radius:6px}",
+    ".dsl-dock-list::-webkit-scrollbar-thumb:hover{background-color:rgba(128,128,128,.6)}",
+    "@keyframes dsl-sunturn{0%,100%{transform:rotate(0) scale(1)}50%{transform:rotate(45deg) scale(1.15)}}",
+    "@keyframes dsl-moonglow{0%,100%{opacity:.6}50%{opacity:1}}",
+    "@keyframes dsl-due{0%,100%{box-shadow:0 0 0 0 rgba(59,130,246,0)}50%{box-shadow:0 0 0 3px rgba(59,130,246,.38)}}",
+    ".dsl-sunturn{animation:dsl-sunturn 6s ease-in-out infinite;transform-origin:50% 50%}",
+    ".dsl-moonglow{animation:dsl-moonglow 3.2s ease-in-out infinite}",
+    ".dsl-due{animation:dsl-due 1.4s ease-in-out infinite}",
+    "@media (prefers-reduced-motion:reduce){.dsl-motion,.dsl-motion *{animation:none!important;transition:none!important}}",
+  ].join("\n");
+
+  function ensureStyles() {
+    try {
+      if (typeof document === "undefined" || document.getElementById(STYLE_ID)) return;
+      const el = document.createElement("style");
+      el.id = STYLE_ID;
+      el.textContent = MOTION_CSS;
+      document.head.appendChild(el);
+    } catch { /* no DOM (tests) — icons still render, just without motion */ }
+  }
+
+  /* --- icons ------------------------------------------------------------ */
+  /**
+   * Stopwatch, drawn as an outline in the text colour so it sits with dsh's own
+   * icons instead of standing out as a full-colour emoji. `currentColor` makes
+   * it follow the theme, the hover state and the button's blue "open" state.
+   * @param motion - "" (still; nudges on hover inside .dsl-btn), "spin"
+   *   (sweeping: scheduling now) or "slow" (ticking: something is pending).
+   */
+  function StopwatchIcon(size, motion) {
+    return h("svg", {
+      width: size, height: size, viewBox: "0 0 24 24", fill: "none",
+      stroke: "currentColor", strokeWidth: 1.8, strokeLinecap: "round", strokeLinejoin: "round",
+      "aria-hidden": "true", style: { flex: "none", display: "block" },
+      className: "dsl-motion dsl-watch" + (motion ? " dsl-" + motion : ""),
+    }, [
+      h("line", { key: "cap", x1: 10, y1: 2, x2: 14, y2: 2 }),
+      h("line", { key: "stem", x1: 12, y1: 2, x2: 12, y2: 6 }),
+      h("line", { key: "hand", className: "dsl-hand", x1: 12, y1: 14, x2: 15, y2: 11 }),
+      h("circle", { key: "face", cx: 12, cy: 14, r: 8 }),
+    ]);
+  }
+
+  /** Hourglass that turns over: "waiting to send". */
+  /**
+   * "Are you sure?" for sending now and cancelling. A dimmed backdrop over the
+   * whole window with one small card: what will happen, the message itself,
+   * and two buttons — the safe one first. The backdrop or Esc (handled by the
+   * component that shows it) dismisses it.
+   *
+   * @param {object} p { title, note, preview, confirmLabel, keepLabel, danger, onConfirm, onClose, isDark }
+   */
+  function confirmDialog(p) {
+    const stopIt = (e) => { if (e && typeof e.stopPropagation === "function") e.stopPropagation(); };
+    const tone = p.danger ? "#ef4444" : "#3b82f6";
+    const card = p.isDark ? "#1f1f22" : "#fff";
+    const hair = p.isDark ? "rgba(255,255,255,.14)" : "rgba(0,0,0,.10)";
+    const btn = (key, label, onClick, primary) => h("button", {
+      key, type: "button", autoFocus: !!primary,
+      onClick: (e) => { stopIt(e); onClick(); },
+      style: {
+        cursor: "pointer", borderRadius: 999, padding: "5px 14px", fontSize: 12.5, fontWeight: primary ? 700 : 600,
+        fontFamily: "inherit", lineHeight: "18px",
+        border: primary ? "none" : "1px solid rgba(128,128,128,.4)",
+        background: primary ? tone : "transparent", color: primary ? "#fff" : "inherit",
+      },
+    }, label);
+    return h("div", {
+      key: "confirm", "data-plugin": "dsh-schedule-later-confirm", role: "presentation",
+      onClick: (e) => { stopIt(e); p.onClose(); },
+      style: {
+        position: "fixed", inset: 0, zIndex: 60, background: "rgba(0,0,0,.45)",
+        display: "flex", alignItems: "center", justifyContent: "center", padding: 16, boxSizing: "border-box",
+      },
+    }, h("div", {
+      role: "alertdialog", "aria-modal": "true", "aria-label": p.title, className: "dsl-pop",
+      onClick: stopIt,
+      style: {
+        width: 380, maxWidth: "100%", boxSizing: "border-box", borderRadius: 14, padding: "16px 16px 14px",
+        background: card, color: p.isDark ? "#eee" : "#111", border: "1px solid " + hair,
+        boxShadow: "0 16px 40px rgba(0,0,0,.35)", fontSize: 13, lineHeight: "19px",
+      },
+    }, [
+      h("div", { key: "hd", style: { display: "flex", gap: 10, alignItems: "flex-start" } }, [
+        h("span", {
+          key: "i", "aria-hidden": "true",
+          style: {
+            flex: "none", width: 28, height: 28, borderRadius: 999, display: "inline-flex", alignItems: "center", justifyContent: "center",
+            background: p.iconTone === "day" ? "rgba(251,191,36,.18)" : p.iconTone === "night" ? "rgba(59,130,246,.18)"
+              : p.danger ? "rgba(239,68,68,.15)" : "rgba(59,130,246,.15)",
+            color: p.iconTone === "day" ? (p.isDark ? "#fcd34d" : "#b45309") : p.iconTone === "night" ? (p.isDark ? "#93c5fd" : "#2563eb") : tone,
+            fontWeight: 800, fontSize: 15,
+          },
+        }, p.icon === "send" ? SendGlyph(14) : "!"),
+        h("div", { key: "t", style: { minWidth: 0 } }, [
+          h("div", { key: "a", style: { fontWeight: 700, fontSize: 14 } }, p.title),
+          p.note ? h("div", { key: "b", style: { marginTop: 3, opacity: .75 } }, p.note) : null,
+        ]),
+      ]),
+      p.preview
+        ? h("div", {
+            key: "pv", "data-confirm-preview": "",
+            style: {
+              margin: "12px 0 0", padding: "8px 10px", borderRadius: 8, border: "1px solid " + hair,
+              background: p.isDark ? "rgba(255,255,255,.04)" : "rgba(0,0,0,.035)",
+              fontFamily: "monospace", fontSize: 12, lineHeight: "17px", whiteSpace: "pre-wrap", wordBreak: "break-word",
+              display: "-webkit-box", WebkitLineClamp: 4, WebkitBoxOrient: "vertical", overflow: "hidden",
+            },
+          }, p.preview)
+        : null,
+      h("div", { key: "ac", style: { display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 14 } }, [
+        btn("keep", p.keepLabel || "Keep it scheduled", p.onClose, false),
+        btn("go", p.confirmLabel, () => { p.onClose(); p.onConfirm(); }, true),
+      ]),
+    ]));
+  }
+
+  /** The dialog for one message, sending now or cancelling it. */
+  function askFor(kind, t, chatTitle) {
+    const when = new Date(t.sendAt);
+    const at = clock12(when);
+    const time = at.h12 + ":" + at.mm + " " + at.ampm;
+    const where = chatTitle ? "“" + chatTitle + "”" : "its chat";
+    if (kind === "send") {
+      return {
+        title: "Send this message now?",
+        note: "It goes into " + where + " right away, not at " + time + ", and the model will reply to it.",
+        // The button is red like Cancel: once sent it cannot be taken back.
+        // The paper plane keeps the send time's colour — amber by day, blue by night.
+        preview: t.content, confirmLabel: "Send now", danger: true, icon: "send",
+        iconTone: isDaytime(hourOf(when)) ? "day" : "night",
+      };
+    }
+    return {
+      title: "Cancel this scheduled message?",
+      note: "It will not be sent at " + time + ". This can\u2019t be undone.",
+      preview: t.content, confirmLabel: "Cancel message", danger: true,
+    };
+  }
+
+  /** Paper plane: "Send now". */
+  function SendGlyph(size) {
+    return h("svg", {
+      width: size, height: size, viewBox: "0 0 24 24", fill: "none",
+      stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round",
+      "aria-hidden": "true", style: { flex: "none", display: "block" },
+    }, [
+      h("path", { key: "a", d: "M22 2 11 13" }),
+      h("path", { key: "b", d: "M22 2 15 22 11 13 2 9 22 2" }),
+    ]);
+  }
+
+  /** Clock face: "Change time". */
+  function ClockGlyph(size) {
+    return h("svg", {
+      width: size, height: size, viewBox: "0 0 24 24", fill: "none",
+      stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round",
+      "aria-hidden": "true", style: { flex: "none", display: "block" },
+    }, [
+      h("circle", { key: "c", cx: 12, cy: 12, r: 9 }),
+      h("path", { key: "h", d: "M12 7v5l3 2" }),
+    ]);
+  }
+
+  /** "YYYY-MM-DDTHH:mm" in local time, the value a datetime-local input takes. */
+  function toLocalInput(ms) {
+    const d = new Date(ms);
+    const pad = (n) => String(n).padStart(2, "0");
+    return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "T" + pad(d.getHours()) + ":" + pad(d.getMinutes());
+  }
+
+  function HourglassIcon(size) {
+    return h("svg", {
+      width: size, height: size, viewBox: "0 0 24 24", fill: "none",
+      stroke: "currentColor", strokeWidth: 1.8, strokeLinecap: "round", strokeLinejoin: "round",
+      "aria-hidden": "true", className: "dsl-motion dsl-flip",
+      style: { flex: "none", display: "inline-block", verticalAlign: "-2px" },
+    }, [
+      h("line", { key: "t", x1: 6, y1: 2, x2: 18, y2: 2 }),
+      h("line", { key: "b", x1: 6, y1: 22, x2: 18, y2: 22 }),
+      h("path", { key: "l", d: "M7 2c0 4 5 6 5 10s-5 6-5 10" }),
+      h("path", { key: "r", d: "M17 2c0 4-5 6-5 10s5 6 5 10" }),
+      h("path", { key: "sand", d: "M9.2 20c.9-1.8 1.9-2.8 2.8-2.8s1.9 1 2.8 2.8z", fill: "currentColor", stroke: "none", opacity: 0.55 }),
+    ]);
+  }
+
+  function SunGlyph(size, color) {
+    const rays = [];
+    for (let i = 0; i < 8; i += 1) {
+      const a = (i * Math.PI) / 4;
+      rays.push(h("line", {
+        key: "r" + i, x1: 12 + Math.cos(a) * 7, y1: 12 + Math.sin(a) * 7,
+        x2: 12 + Math.cos(a) * 9.5, y2: 12 + Math.sin(a) * 9.5,
+      }));
+    }
+    return h("svg", {
+      width: size, height: size, viewBox: "0 0 24 24", fill: "none", stroke: color || "currentColor",
+      strokeWidth: 2, strokeLinecap: "round", "aria-hidden": "true", style: { flex: "none", display: "inline-block", verticalAlign: "-2px" },
+    }, [h("circle", { key: "c", cx: 12, cy: 12, r: 4, fill: color || "currentColor" }), ...rays]);
+  }
+
+  function MoonGlyph(size, color) {
+    return h("svg", {
+      width: size, height: size, viewBox: "0 0 24 24", "aria-hidden": "true",
+      style: { flex: "none", display: "inline-block", verticalAlign: "-2px" },
+    }, h("path", { d: "M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5z", fill: color || "currentColor" }));
+  }
+
+  /* --- time helpers ------------------------------------------------------ */
+  function pad2(n) { return String(n).padStart(2, "0"); }
+
+  function toDatetimeLocalValue(ms) {
+    const d = new Date(ms);
+    return d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate())
+      + "T" + pad2(d.getHours()) + ":" + pad2(d.getMinutes());
+  }
+
+  /** The datetime-local value as epoch ms (local time), or NaN. */
+  function parseLocal(value) {
+    return value ? new Date(value).getTime() : NaN;
+  }
+
+  /** 12-hour clock parts. Always AM/PM, whatever the locale: that is the point. */
+  function clock12(d) {
+    const hour = d.getHours();
+    return { h12: hour % 12 || 12, mm: pad2(d.getMinutes()), ampm: hour < 12 ? "AM" : "PM" };
+  }
+
+  const PHASES = {
+    night: { label: "Night", top: "#0b1026", bottom: "#29346f" },
+    dawn: { label: "Early morning", top: "#6f7fd1", bottom: "#f7b58a" },
+    morning: { label: "Morning", top: "#4f9ee8", bottom: "#c3e4ff" },
+    afternoon: { label: "Afternoon", top: "#2f86db", bottom: "#a3d5ff" },
+    evening: { label: "Evening", top: "#5b3f8c", bottom: "#f08a5d" },
+  };
+
+  function phaseOf(hour) {
+    if (hour < 5) return "night";
+    if (hour < 7) return "dawn";
+    if (hour < 12) return "morning";
+    if (hour < 17) return "afternoon";
+    if (hour < 20) return "evening";
+    return "night";
+  }
+
+  /** Sun is up 06:00–18:00 in this picture — simple, and never ambiguous. */
+  function isDaytime(hour) { return hour >= 6 && hour < 18; }
+
+  function hourOf(d) { return d.getHours() + d.getMinutes() / 60; }
+
+  /** "Today · Wed 23 Sep", "Tomorrow · Thu 24 Sep", or just the date. */
+  function dayLine(ms, now) {
+    const d = new Date(ms);
+    const midnight = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+    const diff = Math.round((midnight(d) - midnight(new Date(now))) / 86_400_000);
+    const date = d.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+    if (diff === 0) return "Today · " + date;
+    if (diff === 1) return "Tomorrow · " + date;
+    if (diff === -1) return "Yesterday · " + date;
+    return date;
+  }
+
+  /**
+   * The colour of a scheduled message's time of day, as "r,g,b" so it can be
+   * used at any strength. Chosen to read on both themes: indigo night, peach
+   * dawn, blue day, orange dusk — the popover's sky, one shade each.
+   */
+  const PHASE_TINT = {
+    night: "99,102,241",
+    dawn: "244,162,97",
+    morning: "79,158,232",
+    afternoon: "59,130,246",
+    evening: "231,111,81",
+  };
+
+  /**
+   * How a scheduled-message row looks for its send time: a faint sky wash
+   * from the left, an accent stripe, and a pulse in its last minute.
+   */
+  function skyRow(sendAt, now) {
+    const hour = hourOf(new Date(sendAt));
+    const rgb = PHASE_TINT[phaseOf(hour)];
+    const left = sendAt - now;
+    const soon = left > 0 && left <= 60_000;
+    return {
+      className: "dsl-motion" + (soon ? " dsl-due" : ""),
+      style: {
+        background: "linear-gradient(90deg, rgba(" + rgb + ",.26) 0%, rgba(" + rgb + ",.10) 45%, rgba(" + rgb + ",.04) 100%)",
+        border: "1px solid rgba(" + rgb + ",.32)",
+        borderLeft: "3px solid rgb(" + rgb + ")",
+        transition: "background .6s, border-color .6s",
+      },
+    };
+  }
+
+  /** "Today", "Tomorrow", a weekday within the week, else a short date. */
+  function shortDay(ms, now) {
+    const d = new Date(ms);
+    const midnight = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+    const diff = Math.round((midnight(d) - midnight(new Date(now))) / 86_400_000);
+    if (diff === 0) return "Today";
+    if (diff === 1) return "Tomorrow";
+    if (diff === -1) return "Yesterday";
+    if (diff > 1 && diff < 7) return d.toLocaleDateString(undefined, { weekday: "long" });
+    return d.toLocaleDateString(undefined, { day: "numeric", month: "short" });
+  }
+
+  /**
+   * "Today · ☀ 3:42 PM": the day, then the time in a pill with its sun or
+   * moon — the same pill as the scheduler. The exact timestamp is the tooltip.
+   */
+  function whenPill(sendAt, now, isDark, opts) {
+    const withDay = !(opts && opts.day === false);
+    const d = new Date(sendAt);
+    const parts = clock12(d);
+    const day = isDaytime(hourOf(d));
+    return h("span", {
+      key: "at", title: formatLocalTime(sendAt),
+      style: { display: "inline-flex", alignItems: "center", gap: 6, flexShrink: 0 },
+    }, [
+      withDay ? h("span", { key: "d" }, shortDay(sendAt, now)) : null,
+      h("span", {
+        key: "p",
+        style: {
+          display: "inline-flex", alignItems: "center", gap: 4, padding: "0 7px", borderRadius: 999,
+          fontSize: 11, fontWeight: 700, lineHeight: "18px", fontVariantNumeric: "tabular-nums",
+          background: day ? "rgba(251,191,36,.18)" : "rgba(99,102,241,.22)",
+          color: day ? (isDark ? "#fcd34d" : "#b45309") : (isDark ? "#c7d2fe" : "#4338ca"),
+        },
+      }, [
+        h("span", { key: "g", className: "dsl-motion " + (day ? "dsl-sunturn" : "dsl-moonglow"), style: { display: "inline-flex" } },
+          day ? SunGlyph(11) : MoonGlyph(11)),
+        h("span", { key: "t" }, parts.h12 + ":" + parts.mm + " " + parts.ampm),
+      ]),
+    ]);
+  }
+
+  /** Rounded UP to the next whole minute: "+5 min" never lands at 4m 30s. */
+  function ceilMinute(ms) { return Math.ceil(ms / 60_000) * 60_000; }
+
+  function presetsFor(now) {
+    const out = [
+      { key: "5m", label: "+5 min", at: ceilMinute(now + 5 * 60_000) },
+      { key: "15m", label: "+15 min", at: ceilMinute(now + 15 * 60_000) },
+      { key: "1h", label: "+1 hour", at: ceilMinute(now + 60 * 60_000) },
+    ];
+    const tonight = new Date(now);
+    tonight.setHours(21, 0, 0, 0);
+    if (tonight.getTime() - now > 10 * 60_000) out.push({ key: "tonight", label: "Tonight 9 PM", at: tonight.getTime(), night: true });
+    const tomorrow = new Date(now);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    tomorrow.setHours(9, 0, 0, 0);
+    out.push({ key: "tomorrow", label: "Tomorrow 9 AM", at: tomorrow.getTime(), day: true });
+    return out;
+  }
+
+  /**
+   * An angle that turns the SHORT way from the previous one: 350° → 10° goes
+   * forward 20°, not backwards 340°, so the hands never spin wildly.
+   */
+  function useTurn(deg) {
+    const last = React.useRef(deg);
+    const next = deg + 360 * Math.round((last.current - deg) / 360);
+    last.current = next;
+    return next;
+  }
+
+  /* --- sky: day or night, at a glance ------------------------------------ */
+  function SkyBand(props) {
+    const d = new Date(Number.isFinite(props.ms) ? props.ms : Date.now());
+    const hour = hourOf(d);
+    const phase = phaseOf(hour);
+    const day = isDaytime(hour);
+    const clamp = (p) => Math.min(1, Math.max(0, p));
+    // Along an arc: rises at the left, highest at noon/midnight, sets right.
+    // The peak stays clear of the title row across the top of the band.
+    const place = (p) => ({
+      left: "calc(" + (6 + clamp(p) * 88).toFixed(2) + "% - 9px)",
+      bottom: Math.round(10 + Math.sin(clamp(p) * Math.PI) * 24) + "px",
+    });
+    const orb = (extra) => ({
+      position: "absolute", width: 18, height: 18,
+      transition: "left .8s cubic-bezier(.2,.8,.2,1), bottom .8s cubic-bezier(.2,.8,.2,1), opacity .6s",
+      ...extra,
+    });
+    const starsOpacity = phase === "night" ? 1 : phase === "dawn" || phase === "evening" ? 0.3 : 0;
+    const stars = [[12, 40], [22, 58], [34, 36], [48, 50], [61, 34], [73, 56], [86, 42], [93, 62]];
+    const P = PHASES[phase];
+
+    return h("div", {
+      className: "dsl-motion", "aria-hidden": "true",
+      style: {
+        // Spans the whole popover; the popover's own rounded, clipped
+        // shell gives it its corners.
+        position: "relative", height: 84, overflow: "hidden", flex: "none",
+      },
+    }, [
+      ...Object.keys(PHASES).map((id) => h("div", {
+        key: "sky-" + id,
+        style: {
+          position: "absolute", inset: 0,
+          background: "linear-gradient(180deg," + PHASES[id].top + " 0%," + PHASES[id].bottom + " 100%)",
+          opacity: id === phase ? 1 : 0, transition: "opacity .8s ease",
+        },
+      })),
+      h("div", { key: "stars", style: { position: "absolute", inset: 0, opacity: starsOpacity, transition: "opacity .8s" } },
+        stars.map(([x, y], i) => h("span", {
+          key: "s" + i, className: "dsl-twinkle",
+          style: {
+            position: "absolute", left: x + "%", top: y + "%", width: i % 3 === 0 ? 3 : 2, height: i % 3 === 0 ? 3 : 2,
+            borderRadius: 999, background: "#fff", animationDelay: (i * 0.37).toFixed(2) + "s",
+          },
+        }))),
+      h("div", { key: "sun", style: orb({ ...place((hour - 6) / 12), opacity: day ? 1 : 0 }) }, [
+        h("div", { key: "halo", className: "dsl-glow", style: { position: "absolute", inset: -7, borderRadius: 999, background: "radial-gradient(circle, rgba(253,224,71,.8), rgba(253,224,71,0) 70%)" } }),
+        h("div", { key: "disc", style: { position: "absolute", inset: 0, borderRadius: 999, background: "radial-gradient(circle at 35% 35%, #fff7c2, #fbbf24 60%, #f59e0b)" } }),
+      ]),
+      h("div", { key: "moon", style: orb({ ...place(((hour - 18 + 24) % 24) / 12), opacity: day ? 0 : 1 }) },
+        h("div", { style: { position: "absolute", inset: 0, borderRadius: 999, background: "#f1f5ff", boxShadow: "inset -5px -3px 0 0 #c7d2fe, 0 0 10px rgba(226,232,255,.6)" } })),
+      h("svg", {
+        key: "hills", viewBox: "0 0 100 20", preserveAspectRatio: "none",
+        style: { position: "absolute", left: 0, right: 0, bottom: 0, width: "100%", height: 16 },
+      }, h("path", { d: "M0 14 Q18 6 36 12 T70 10 T100 12 V20 H0z", fill: "rgba(0,0,0,.28)" })),
+      h("div", {
+        key: "head",
+        style: {
+          position: "absolute", top: 8, left: 12, right: 10, display: "flex", alignItems: "center", gap: 8,
+          color: "#fff", textShadow: "0 1px 2px rgba(0,0,0,.45)",
+        },
+      }, [
+        h("span", { key: "t", style: { fontWeight: 700, fontSize: 13 } }, props.title),
+        h("span", {
+          key: "p",
+          style: {
+            marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11, fontWeight: 600,
+            padding: "2px 8px", borderRadius: 999, background: "rgba(0,0,0,.28)", textShadow: "none",
+          },
+        }, [day ? SunGlyph(12, "#fde047") : MoonGlyph(12, "#e0e7ff"), h("span", { key: "l" }, P.label)]),
+      ]),
+    ]);
+  }
+
+  /* --- analog clock beside the time -------------------------------------- */
+  function TimeDial(props) {
+    const d = new Date(Number.isFinite(props.ms) ? props.ms : Date.now());
+    const hr = d.getHours();
+    const min = d.getMinutes();
+    const night = !isDaytime(hourOf(d));
+    const hourDeg = useTurn(((hr % 12) + min / 60) * 30);
+    const minDeg = useTurn(min * 6);
+    const face = night ? "#101a3a" : props.isDark ? "#f5f7fb" : "#ffffff";
+    const ink = night ? "#e0e7ff" : "#1f2937";
+    const ring = night ? "#3b4a8a" : props.isDark ? "rgba(255,255,255,.35)" : "rgba(0,0,0,.16)";
+    const turn = (deg) => ({
+      transform: "rotate(" + deg + "deg)", transformBox: "view-box", transformOrigin: "50px 50px",
+      transition: "transform .8s cubic-bezier(.2,.8,.2,1)",
+    });
+    const ticks = [];
+    for (let i = 0; i < 12; i += 1) {
+      const a = (i * Math.PI) / 6;
+      const inner = i % 3 === 0 ? 33 : 37;
+      ticks.push(h("line", {
+        key: "k" + i, x1: 50 + Math.sin(a) * inner, y1: 50 - Math.cos(a) * inner,
+        x2: 50 + Math.sin(a) * 41, y2: 50 - Math.cos(a) * 41,
+        stroke: ink, strokeWidth: i % 3 === 0 ? 3 : 1.6, strokeLinecap: "round", opacity: i % 3 === 0 ? 0.9 : 0.45,
+        style: { transition: "stroke .6s" },
+      }));
+    }
+    return h("svg", {
+      className: "dsl-motion", width: props.size || 76, height: props.size || 76, viewBox: "0 0 100 100", "aria-hidden": "true",
+      style: { flex: "none", display: "block" },
+    }, [
+      h("circle", { key: "face", cx: 50, cy: 50, r: 46, style: { fill: face, stroke: ring, strokeWidth: 2, transition: "fill .6s, stroke .6s" } }),
+      ...(night
+        ? [[30, 30], [70, 27], [67, 72]].map(([x, y], i) => h("circle", {
+            key: "st" + i, cx: x, cy: y, r: 1.4, fill: "#fff", className: "dsl-twinkle",
+            style: { animationDelay: (i * 0.6).toFixed(1) + "s" },
+          }))
+        : []),
+      ...ticks,
+      h("g", { key: "hh", style: turn(hourDeg) },
+        h("line", { x1: 50, y1: 52, x2: 50, y2: 26, stroke: ink, strokeWidth: 5, strokeLinecap: "round", style: { transition: "stroke .6s" } })),
+      h("g", { key: "mh", style: turn(minDeg) },
+        h("line", { x1: 50, y1: 54, x2: 50, y2: 13, stroke: "#3b82f6", strokeWidth: 3, strokeLinecap: "round" })),
+      h("circle", { key: "pin", cx: 50, cy: 50, r: 3.5, fill: "#3b82f6", stroke: face, strokeWidth: 1.5 }),
+      // Over the hands, with a halo in the face colour, so a hand passing
+      // through never hides whether this is morning or night.
+      h("text", {
+        key: "ampm", x: 50, y: 75, textAnchor: "middle", fontSize: 12, fontWeight: 800,
+        stroke: face, strokeWidth: 4, strokeLinejoin: "round",
+        style: { fill: ink, paintOrder: "stroke", letterSpacing: ".5px", transition: "fill .6s, stroke .6s" },
+      }, hr < 12 ? "AM" : "PM"),
+    ]);
+  }
+
+  /* --- date & time picker: the popover's right-hand extension ------------ */
+  const MAIN_W = 320;
+  const EXT_W = 284;
+  const WEEKDAYS = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
+
+  /** The sky across one day, left (midnight) to right (midnight). */
+  const DAY_GRADIENT = "linear-gradient(90deg,#0b1026 0%,#1f2a5c 17%,#f7b58a 25%,#7cc0f5 32%,#4aa3f0 50%,#7cc0f5 68%,#f08a5d 76%,#5b3f8c 82%,#141b3d 90%,#0b1026 100%)";
+
+  /** A datetime-local string with some fields replaced; the day is clamped to the month. */
+  function withParts(value, patch, now) {
+    const ms = parseLocal(value);
+    const base = new Date(Number.isFinite(ms) ? ms : ceilMinute(now + 5 * 60_000));
+    const year = patch.year ?? base.getFullYear();
+    const month = patch.month ?? base.getMonth();
+    const lastDay = new Date(year, month + 1, 0).getDate();
+    const day = Math.min(patch.day ?? base.getDate(), lastDay);
+    const hour = patch.hour ?? base.getHours();
+    const minute = patch.minute ?? base.getMinutes();
+    return toDatetimeLocalValue(new Date(year, month, day, hour, minute).getTime());
+  }
+
+  /** Move by real time, so 11:30 PM + 1 hour rolls onto the next day. */
+  function shifted(value, minutes, now) {
+    const ms = parseLocal(value);
+    const base = Number.isFinite(ms) ? ms : ceilMinute(now + 5 * 60_000);
+    return toDatetimeLocalValue(base + minutes * 60_000);
+  }
+
+  /** Minutes snap to :05 steps: 23 → up 25, down 20. */
+  function snappedMinute(value, direction, now) {
+    const ms = parseLocal(value);
+    const d = new Date(Number.isFinite(ms) ? ms : ceilMinute(now + 5 * 60_000));
+    const m = d.getMinutes();
+    const target = direction > 0 ? (Math.floor(m / 5) + 1) * 5 : (Math.ceil(m / 5) - 1) * 5;
+    return shifted(value, target - m, now);
+  }
+
+  /**
+   * Turn the mouse wheel over `ref` into steps: one per notch, and a
+   * trackpad's many small deltas add up to the same. Wheel up is later, like
+   * ▲ and like a number field. Registered natively and non-passive — React's
+   * onWheel is passive, so it could not stop the chat behind from scrolling.
+   * @param onStep - called with a signed whole number of steps.
+   * @param ignore - optional: a wheel over a target this accepts scrolls normally.
+   */
+  function useWheel(ref, onStep, ignore) {
+    const latest = React.useRef({ onStep, ignore });
+    latest.current = { onStep, ignore };
+    React.useEffect(() => {
+      const el = ref.current;
+      if (!el || typeof el.addEventListener !== "function") return undefined;
+      let pending = 0;
+      const onWheel = (e) => {
+        if (latest.current.ignore && latest.current.ignore(e.target)) return;
+        e.preventDefault();
+        pending += e.deltaMode === 1 ? e.deltaY * 33 : e.deltaMode === 2 ? e.deltaY * 400 : e.deltaY;
+        const steps = Math.trunc(pending / 100);
+        if (steps === 0) return;
+        pending -= steps * 100;
+        latest.current.onStep(-steps);
+      };
+      el.addEventListener("wheel", onWheel, { passive: false });
+      return () => el.removeEventListener("wheel", onWheel);
+    }, []);
+  }
+
+  /**
+   * One column of the time: ▲ / value / ▼. Scroll over it to step; click the
+   * value for a scrollable list to pick from.
+   */
+  function TimeColumn(p) {
+    const boxRef = React.useRef(null);
+    const listRef = React.useRef(null);
+    useWheel(boxRef, p.onStep, (target) => !!listRef.current && typeof listRef.current.contains === "function" && listRef.current.contains(target));
+    // Opening the list puts the current value in its middle.
+    React.useEffect(() => {
+      if (!p.open) return;
+      const list = listRef.current;
+      const current = list && typeof list.querySelector === "function" ? list.querySelector('[aria-selected="true"]') : null;
+      if (list && current) list.scrollTop = current.offsetTop - (list.clientHeight - current.offsetHeight) / 2;
+    }, [p.open]);
+    const arrow = (label, n, glyph) => h("button", {
+      key: label, type: "button", "aria-label": label, onClick: () => p.onStep(n),
+      style: {
+        cursor: "pointer", border: "none", background: "transparent", color: p.muted, width: 40, height: 18,
+        padding: 0, fontSize: 10, lineHeight: "18px", borderRadius: 6, ...(p.mobile ? { minHeight: TOUCH_MIN, width: 48 } : {}),
+      },
+    }, glyph);
+    return h("div", {
+      ref: boxRef, "data-time-column": p.id, title: "Scroll to change · click to pick",
+      style: { position: "relative", display: "flex", flexDirection: "column", alignItems: "center" },
+    }, [
+      arrow(p.laterLabel, 1, "▲"),
+      h("button", {
+        key: "v", type: "button", "aria-label": p.label, "aria-haspopup": "listbox", "aria-expanded": !!p.open,
+        onClick: p.onToggle,
+        style: {
+          cursor: "pointer", border: "none", color: "inherit", fontSize: 24, fontWeight: 700, fontVariantNumeric: "tabular-nums",
+          lineHeight: "34px", minWidth: 50, padding: "0 4px", borderRadius: 8,
+          background: p.open ? "rgba(59,130,246,.18)" : p.isDark ? "rgba(255,255,255,.07)" : "rgba(0,0,0,.05)",
+          boxShadow: p.open ? "inset 0 0 0 1.5px #3b82f6" : "none",
+          ...(p.mobile ? { minHeight: TOUCH_MIN } : {}),
+        },
+      }, p.text),
+      arrow(p.earlierLabel, -1, "▼"),
+      p.open
+        ? h("div", {
+            key: "list", ref: listRef, role: "listbox", "aria-label": p.label,
+            style: {
+              position: "absolute", bottom: "calc(100% + 4px)", left: "50%", transform: "translateX(-50%)", zIndex: 5,
+              width: 64, maxHeight: 184, overflowY: "auto", overscrollBehavior: "contain", padding: 4, boxSizing: "border-box",
+              display: "flex", flexDirection: "column", gap: 2, borderRadius: 10,
+              border: "1px solid " + p.hairline, background: p.isDark ? "#26262a" : "#fff", boxShadow: "0 8px 20px rgba(0,0,0,.3)",
+            },
+          }, p.options.map((o) => h("button", {
+            key: o.key, type: "button", role: "option", "aria-selected": o.selected, onClick: () => p.onPick(o.value),
+            style: {
+              cursor: "pointer", border: "none", borderRadius: 6, padding: "4px 0", fontSize: 13, flex: "none",
+              fontVariantNumeric: "tabular-nums", fontWeight: o.selected ? 700 : 500,
+              background: o.selected ? "#3b82f6" : "transparent", color: o.selected ? "#fff" : "inherit",
+              ...(p.mobile ? { minHeight: TOUCH_MIN } : {}),
+            },
+          }, o.label)))
+        : null,
+    ]);
+  }
+
+  function DateTimePanel(props) {
+    const { value, onChange, now, isDark, mobile, muted, hairline } = props;
+    const ms = parseLocal(value);
+    const sel = new Date(Number.isFinite(ms) ? ms : ceilMinute(now + 5 * 60_000));
+    const today = new Date(now);
+    const [view, setView] = React.useState(() => ({ y: sel.getFullYear(), m: sel.getMonth() }));
+    const [list, setList] = React.useState(null); // which time column has its list open
+    const trackRef = React.useRef(null);
+    // A quick pick or a stepper that lands in another month brings the calendar with it.
+    React.useEffect(() => { setView({ y: sel.getFullYear(), m: sel.getMonth() }); }, [sel.getFullYear(), sel.getMonth()]);
+
+    const sameDay = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+    const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
+    const atFirstMonth = view.y < today.getFullYear() || (view.y === today.getFullYear() && view.m <= today.getMonth());
+    const touch = mobile ? { minHeight: TOUCH_MIN, minWidth: TOUCH_MIN, boxSizing: "border-box" } : {};
+
+    const navBtn = (label, delta, disabled) => h("button", {
+      key: label, type: "button", "aria-label": label, disabled,
+      onClick: () => setView((v) => {
+        const d = new Date(v.y, v.m + delta, 1);
+        return { y: d.getFullYear(), m: d.getMonth() };
+      }),
+      style: {
+        cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.3 : 1, border: "none", background: "transparent",
+        color: "inherit", width: 26, height: 26, borderRadius: 999, fontSize: 15, lineHeight: "26px", padding: 0, ...touch,
+      },
+    }, delta < 0 ? "‹" : "›");
+
+    const first = new Date(view.y, view.m, 1);
+    const lead = (first.getDay() + 6) % 7; // weeks start on Monday
+    const cells = [];
+    for (let i = 0; i < 42; i += 1) {
+      const d = new Date(view.y, view.m, 1 - lead + i);
+      const inMonth = d.getMonth() === view.m;
+      const past = d.getTime() < startOfToday;
+      const chosen = sameDay(d, sel);
+      const isToday = sameDay(d, today);
+      cells.push(h("button", {
+        key: "d" + i, type: "button", disabled: past,
+        "aria-label": d.toDateString(), "aria-pressed": chosen,
+        onClick: () => {
+          let next = withParts(value, { year: d.getFullYear(), month: d.getMonth(), day: d.getDate() }, now);
+          // Today with a time that has already gone: move to the next sensible minute.
+          if (parseLocal(next) <= now) next = toDatetimeLocalValue(ceilMinute(now + 5 * 60_000));
+          onChange(next);
+        },
+        style: {
+          cursor: past ? "default" : "pointer", border: "none", padding: 0, fontSize: 12,
+          height: mobile ? TOUCH_MIN : 28, borderRadius: 999, fontVariantNumeric: "tabular-nums",
+          fontWeight: chosen ? 700 : 500,
+          background: chosen ? "#3b82f6" : "transparent",
+          color: chosen ? "#fff" : "inherit",
+          opacity: past ? 0.25 : inMonth ? 1 : 0.4,
+          boxShadow: isToday && !chosen ? "inset 0 0 0 1.5px #3b82f6" : "none",
+          transition: "background .15s",
+        },
+      }, String(d.getDate())));
+    }
+
+    const hour = sel.getHours();
+    const parts = clock12(sel);
+    const day = isDaytime(hourOf(sel));
+    const minuteSteps = (n) => {
+      let next = value;
+      for (let i = 0; i < Math.abs(n); i += 1) next = snappedMinute(next, Math.sign(n), now);
+      return next;
+    };
+    const hourOptions = [12, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].map((h12) => ({
+      key: "h" + h12, label: String(h12).padStart(2, "0"), value: h12, selected: parts.h12 === h12,
+    }));
+    const minuteValues = [];
+    for (let m = 0; m < 60; m += 5) minuteValues.push(m);
+    // An exact minute like :23 stays pickable instead of vanishing from the list.
+    if (!minuteValues.includes(sel.getMinutes())) minuteValues.push(sel.getMinutes());
+    const minuteOptions = minuteValues.sort((a, b) => a - b).map((m) => ({
+      key: "m" + m, label: String(m).padStart(2, "0"), value: m, selected: sel.getMinutes() === m,
+    }));
+    const column = (id, text, onStep, options, onPick, label, laterLabel, earlierLabel) => h(TimeColumn, {
+      key: id, id, text, label, laterLabel, earlierLabel, options, isDark, mobile, muted, hairline,
+      open: list === id,
+      onToggle: () => setList(list === id ? null : id),
+      onStep: (n) => { setList(null); onChange(onStep(n)); },
+      onPick: (v) => { setList(null); onChange(onPick(v)); },
+    });
+    const half = (label, isPm) => {
+      const active = isPm ? hour >= 12 : hour < 12;
+      return h("button", {
+        key: label, type: "button", "aria-pressed": active,
+        onClick: () => {
+          if (isPm && hour < 12) onChange(withParts(value, { hour: hour + 12 }, now));
+          if (!isPm && hour >= 12) onChange(withParts(value, { hour: hour - 12 }, now));
+        },
+        style: {
+          cursor: "pointer", border: "none", padding: "4px 10px", fontSize: 11, fontWeight: 700, letterSpacing: ".5px",
+          background: active ? "#3b82f6" : "transparent", color: active ? "#fff" : "inherit",
+          ...(mobile ? { minHeight: TOUCH_MIN } : {}),
+        },
+      }, label);
+    };
+
+    const minuteOfDay = hour * 60 + sel.getMinutes();
+    const pct = (minuteOfDay / 1440) * 100;
+    const setFromPointer = (e) => {
+      const rect = e.currentTarget.getBoundingClientRect();
+      const x = Math.min(Math.max(e.clientX - rect.left, 0), rect.width);
+      const total = Math.min(1435, Math.round(((x / rect.width) * 1440) / 5) * 5);
+      onChange(withParts(value, { hour: Math.floor(total / 60), minute: total % 60 }, now));
+    };
+    // Scrolling over the sky moves the time by five minutes a notch, same day.
+    useWheel(trackRef, (n) => {
+      const total = Math.min(1435, Math.max(0, Math.round(minuteOfDay / 5) * 5 + n * 5));
+      onChange(withParts(value, { hour: Math.floor(total / 60), minute: total % 60 }, now));
+    });
+    const slider = h("div", { key: "slider", style: { marginTop: 12 } }, [
+      h("div", {
+        key: "track", ref: trackRef, role: "slider", tabIndex: 0, title: "Drag, click or scroll",
+        "aria-label": "Time of day", "aria-valuemin": 0, "aria-valuemax": 1435, "aria-valuenow": minuteOfDay,
+        "aria-valuetext": parts.h12 + ":" + parts.mm + " " + parts.ampm,
+        onPointerDown: (e) => { e.currentTarget.setPointerCapture?.(e.pointerId); setFromPointer(e); },
+        onPointerMove: (e) => { if (e.buttons & 1) setFromPointer(e); },
+        onKeyDown: (e) => {
+          const step = { ArrowRight: 5, ArrowUp: 5, ArrowLeft: -5, ArrowDown: -5, PageUp: 60, PageDown: -60 }[e.key];
+          if (step === undefined) return;
+          e.preventDefault?.();
+          const total = Math.min(1435, Math.max(0, minuteOfDay + step));
+          onChange(withParts(value, { hour: Math.floor(total / 60), minute: total % 60 }, now));
+        },
+        style: {
+          position: "relative", height: mobile ? TOUCH_MIN : 24, borderRadius: 999, background: DAY_GRADIENT,
+          cursor: "pointer", touchAction: "none", outline: "none",
+          boxShadow: "inset 0 0 0 1px rgba(0,0,0,.15)",
+        },
+      }, [
+        h("span", {
+          key: "thumb", className: "dsl-motion",
+          style: {
+            position: "absolute", top: "50%", left: "calc((100% - 22px) * " + (pct / 100).toFixed(4) + ")", width: 22, height: 22,
+            marginTop: -11, borderRadius: 999, display: "flex", alignItems: "center", justifyContent: "center",
+            background: day ? "#fff7d6" : "#1e2550", border: "2px solid #fff",
+            boxShadow: "0 1px 4px rgba(0,0,0,.4)", transition: "left .12s ease-out, background .3s",
+          },
+        }, day ? SunGlyph(12, "#f59e0b") : MoonGlyph(11, "#e0e7ff")),
+      ]),
+      h("div", {
+        key: "marks",
+        style: { display: "flex", justifyContent: "space-between", fontSize: 10, color: muted, marginTop: 4, fontVariantNumeric: "tabular-nums" },
+      }, [
+        h("span", { key: "a" }, [MoonGlyph(9), " 12 AM"]),
+        h("span", { key: "b" }, "6 AM"),
+        h("span", { key: "c" }, [SunGlyph(9), " 12 PM"]),
+        h("span", { key: "d" }, "6 PM"),
+        h("span", { key: "e" }, [MoonGlyph(9), " 12 AM"]),
+      ]),
+    ]);
+
+    return h("div", {
+      "data-plugin": "dsh-schedule-later-picker", style: { display: "flex", flexDirection: "column" },
+      // A click anywhere outside the time columns closes an open list.
+      onPointerDown: (e) => {
+        if (list !== null && !(e.target && typeof e.target.closest === "function" && e.target.closest("[data-time-column]"))) setList(null);
+      },
+    }, [
+      h("div", { key: "head", style: { display: "flex", alignItems: "center", gap: 4, marginBottom: 6 } }, [
+        navBtn("Previous month", -1, atFirstMonth),
+        h("span", { key: "t", style: { flex: 1, textAlign: "center", fontWeight: 700, fontSize: 13 } },
+          first.toLocaleDateString(undefined, { month: "long", year: "numeric" })),
+        navBtn("Next month", 1, false),
+      ]),
+      h("div", { key: "wk", style: { display: "grid", gridTemplateColumns: "repeat(7, 1fr)", fontSize: 10, color: muted, textAlign: "center", marginBottom: 2 } },
+        WEEKDAYS.map((w) => h("span", { key: w }, w))),
+      h("div", { key: "grid", style: { display: "grid", gridTemplateColumns: "repeat(7, 1fr)", rowGap: 2 } }, cells),
+      h("div", { key: "rule", style: { height: 1, background: hairline, margin: "10px 0" } }),
+      h("div", { key: "time", style: { display: "flex", alignItems: "center", justifyContent: "center", gap: 8 } }, [
+        column("hh", String(parts.h12).padStart(2, "0"),
+          (n) => shifted(value, 60 * n, now),
+          hourOptions,
+          (h12) => withParts(value, { hour: (h12 % 12) + (hour >= 12 ? 12 : 0) }, now),
+          "Hour", "One hour later", "One hour earlier"),
+        h("span", { key: "colon", style: { fontSize: 22, fontWeight: 700, opacity: 0.5 } }, ":"),
+        column("mm", parts.mm,
+          (n) => minuteSteps(n),
+          minuteOptions,
+          (m) => withParts(value, { minute: m }, now),
+          "Minute", "Five minutes later", "Five minutes earlier"),
+        h("div", {
+          key: "ampm",
+          style: { display: "flex", flexDirection: "column", marginLeft: 6, borderRadius: 8, overflow: "hidden", border: "1px solid " + hairline },
+        }, [half("AM", false), half("PM", true)]),
+      ]),
+      slider,
+    ]);
+  }
+
+  function isMobile() {
+    return isMobileViewport(typeof window !== "undefined" ? window.matchMedia : null);
+  }
+
+  /* --- ⏱️ composer button (conversation.input.right) -------------------- */
+  function ScheduleButton(props) {
+    const core = props.core;
+    const [open, setOpen] = React.useState(false);
+    const [timeValue, setTimeValue] = React.useState("");
+    const [busy, setBusy] = React.useState(false);
+    const [error, setError] = React.useState(null);
+    const [now, setNow] = React.useState(() => Date.now());
+    const mobile = isMobile();
+    // "side": the picker is a panel on the right. "stack": it folds under
+    // the popover, behind a toggle — on phones, and wherever a side panel
+    // would run off the screen.
+    const [layout, setLayout] = React.useState(mobile ? "stack" : "side");
+    const [pickerOpen, setPickerOpen] = React.useState(false);
+    const wrapRef = React.useRef(null);
+    // standard session props: useInput(s => s.draft) reads the composer draft
+    const draft = typeof props.useInput === "function"
+      ? (props.useInput((s) => (s == null ? "" : s.draft)) ?? "")
+      : "";
+    // The popover's message box and the composer are the SAME draft: typing
+    // in either shows in the other. `msg` mirrors it locally so typing here
+    // never waits on the composer's store.
+    const canSync = !!(props.inputActions && typeof props.inputActions.setDraft === "function");
+    const [msg, setMsg] = React.useState("");
+    // What this box itself pushed recently. When the composer echoes one of
+    // these back — possibly late, after newer keystrokes — it is ignored, so
+    // a slow echo can never overwrite what was typed since.
+    const echoes = React.useRef([]);
+    React.useEffect(() => {
+      const text = String(draft ?? "");
+      if (echoes.current.includes(text)) return;
+      setMsg(text);
+    }, [draft]);
+    const editMsg = (text) => {
+      setMsg(text);
+      if (!canSync) return;
+      echoes.current = [...echoes.current.slice(-19), text];
+      props.inputActions.setDraft(text);
+    };
+    ensureStyles();
+
+    // A live "Sends in …" while the popover is open; nothing ticks when shut.
+    React.useEffect(() => {
+      if (!open) return undefined;
+      setNow(Date.now());
+      const t = setInterval(() => setNow(Date.now()), 1000);
+      t.unref?.(); // never hold the host loop for a UI countdown
+      return () => clearInterval(t);
+    }, [open]);
+
+    // The popover grows leftwards from the button; a side panel needs the
+    // room for both columns, or it folds underneath instead.
+    React.useEffect(() => {
+      if (!open) return;
+      let side = !mobile;
+      try {
+        const rect = wrapRef.current?.getBoundingClientRect?.();
+        if (side && rect) side = rect.right - (MAIN_W + EXT_W) >= 8;
+      } catch { /* measure failed: keep the default */ }
+      setLayout(side ? "side" : "stack");
+    }, [open, mobile]);
+
+    const openPopover = () => {
+      setTimeValue(toDatetimeLocalValue(typeof core.defaultSendAt === "function" ? core.defaultSendAt() : Date.now() + 5 * 60_000));
+      setError(null);
+      setPickerOpen(false);
+      setMsg(String(draft ?? ""));
+      echoes.current = [];
+      setOpen(true);
+    };
+
+    const pick = (next) => { setTimeValue(next); setError(null); };
+
+    const submit = async () => {
+      if (busy) return;
+      const content = String(msg ?? "");
+      if (!content.trim()) { setError("The message is empty — type what to send first"); return; }
+      const at = parseLocal(timeValue);
+      if (!Number.isFinite(at) || at <= Date.now()) { setError("The send time must be in the future"); return; }
+      setBusy(true);
+      setError(null);
+      try {
+        const payload = { content, sendAt: at, conversationId: props.sessionId };
+        await core.scheduleMessage(payload);
+        // sidebar panel has its own state: refresh it NOW (its 8s poll would
+        // otherwise lag ~10s behind a fresh task)
+        if (props.onTaskCreated) void props.onTaskCreated();
+        // spec: turn the draft into a scheduled task and clear the box — never send now (no submit)
+        if (props.inputActions && typeof props.inputActions.setDraft === "function") props.inputActions.setDraft("");
+        setOpen(false);
+      } catch (err) {
+        // FIX 4 failure mode: nothing was enqueued — keep the popover open
+        // with the form (time + draft) intact and surface the error.
+        setError(String(err?.message || err));
+      } finally {
+        setBusy(false);
+      }
+    };
+
+    const btnStyle = {
+      cursor: "pointer", flexShrink: 0, border: "1px solid " + (open ? "#3b82f6" : "transparent"),
+      background: open ? "rgba(59,130,246,.12)" : "transparent",
+      color: open ? "#3b82f6" : "inherit",
+      borderRadius: 999, fontSize: 12, fontWeight: 600, lineHeight: "18px", padding: "1px 8px",
+      display: "inline-flex", alignItems: "center", gap: 5,
+      opacity: open ? 1 : 0.8,
+      ...(mobile ? { minHeight: TOUCH_MIN } : {}),
+    };
+    const isDark = typeof window !== "undefined" && window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+    const side = layout === "side";
+    const muted = isDark ? "rgba(255,255,255,.6)" : "rgba(0,0,0,.55)";
+    const hairline = isDark ? "rgba(255,255,255,.14)" : "rgba(0,0,0,.10)";
+    const field = isDark ? "rgba(255,255,255,.2)" : "rgba(0,0,0,.18)";
+    // FIX 5: on ≤480px the popover spans (nearly) the full viewport width.
+    const shell = {
+      position: "absolute", bottom: "100%", right: 0, marginBottom: 6, zIndex: 30,
+      width: side ? MAIN_W + EXT_W : MAIN_W, maxWidth: "calc(100vw - 16px)", boxSizing: "border-box",
+      display: "flex", flexDirection: "column", overflow: "hidden", fontSize: 12,
+      borderRadius: 14, border: "1px solid " + hairline,
+      background: isDark ? "#1c1c1e" : "#fff",
+      boxShadow: "0 12px 32px rgba(0,0,0,.28)",
+      color: isDark ? "#eee" : "#111",
+      ...(mobile ? { left: 0, right: 0, width: "calc(100vw - 16px)", maxHeight: "calc(100vh - 120px)", overflowY: "auto" } : {}),
+    };
+    const actionBtn = (extra) => ({
+      cursor: "pointer", borderRadius: 999, padding: "5px 16px", fontSize: 12, ...(extra || {}),
+      ...(mobile ? { minHeight: TOUCH_MIN, boxSizing: "border-box" } : {}),
+    });
+
+    const at = parseLocal(timeValue);
+    const valid = Number.isFinite(at);
+    const past = valid && at <= now;
+    const when = valid ? new Date(at) : null;
+    const parts = when ? clock12(when) : null;
+    const day = when ? isDaytime(hourOf(when)) : true;
+    const chosenKey = presetsFor(now).find((p) => valid && Math.abs(p.at - at) < 60_000)?.key;
+
+    const readout = h("div", { key: "read", style: { display: "flex", alignItems: "center", gap: 12 } }, [
+      h(TimeDial, { key: "dial", ms: at, isDark, size: side ? 124 : 104 }),
+      h("div", { key: "txt", style: { display: "flex", flexDirection: "column", gap: 4, minWidth: 0 } }, [
+        parts
+          ? h("div", { key: "big", style: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" } }, [
+              h("span", { key: "hm", style: { fontSize: 30, fontWeight: 700, lineHeight: "32px", fontVariantNumeric: "tabular-nums", letterSpacing: "-.5px" } },
+                parts.h12 + ":" + parts.mm),
+              h("span", {
+                key: "ap",
+                title: day ? "Daytime" : "Night-time",
+                style: {
+                  display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 8px", borderRadius: 999,
+                  fontSize: 11, fontWeight: 700, letterSpacing: ".5px",
+                  background: day ? "rgba(251,191,36,.18)" : "rgba(99,102,241,.22)",
+                  color: day ? (isDark ? "#fcd34d" : "#b45309") : (isDark ? "#c7d2fe" : "#4338ca"),
+                  transition: "background .4s, color .4s",
+                },
+              }, [day ? SunGlyph(12) : MoonGlyph(12), h("span", { key: "t" }, parts.ampm)]),
+            ])
+          : h("div", { key: "big", style: { fontSize: 14, color: muted } }, "Pick a time"),
+        when ? h("div", { key: "day", style: { color: muted } }, dayLine(at, now)) : null,
+        when
+          ? h("div", {
+              key: "in",
+              style: { display: "inline-flex", alignItems: "center", gap: 5, fontWeight: 600, color: past ? "#dc2626" : "#3b82f6" },
+            }, past
+              ? "That time has already passed"
+              : [HourglassIcon(12), h("span", { key: "t" }, sendsIn(at, now))])
+          : null,
+      ]),
+    ]);
+
+    const chips = h("div", { key: "chips", style: { display: "flex", flexWrap: "wrap", gap: 6 } },
+      presetsFor(now).map((p) => h("button", {
+        key: p.key, type: "button", className: "dsl-chip",
+        onClick: () => pick(toDatetimeLocalValue(p.at)),
+        style: {
+          cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 5,
+          borderRadius: 999, padding: "3px 10px", fontSize: 11, fontWeight: 600,
+          border: "1px solid " + (chosenKey === p.key ? "#3b82f6" : field),
+          background: chosenKey === p.key ? "rgba(59,130,246,.14)" : "transparent",
+          color: chosenKey === p.key ? "#3b82f6" : "inherit",
+          ...(mobile ? { minHeight: TOUCH_MIN, boxSizing: "border-box" } : {}),
+        },
+      }, [
+        p.day ? SunGlyph(11, "#f59e0b") : p.night ? MoonGlyph(11, "#818cf8") : null,
+        h("span", { key: "l" }, p.label),
+      ])));
+
+    const editor = h("div", {
+      key: "msg", style: { display: "flex", flexDirection: "column", gap: 4, flex: side ? 1 : "none", minHeight: 0 },
+    }, [
+      h("div", { key: "l", style: { display: "flex", alignItems: "baseline", gap: 8, fontSize: 11, color: muted } }, [
+        h("span", { key: "a" }, "Message"),
+        canSync ? h("span", { key: "b", style: { marginLeft: "auto", fontSize: 10 } }, "same as the message box") : null,
+      ]),
+      h("textarea", {
+        key: "t", value: msg, rows: side ? 5 : 3, "aria-label": "Message to send later",
+        placeholder: "Type what to send later…",
+        autoFocus: !String(msg).trim(),
+        onChange: (e) => editMsg(e?.target?.value ?? ""),
+        onKeyDown: (e) => {
+          if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault?.(); void submit(); }
+        },
+        style: {
+          flex: side ? 1 : "none", minHeight: side ? 96 : 64, width: "100%", boxSizing: "border-box",
+          resize: side ? "none" : "vertical", fontFamily: "inherit", fontSize: mobile ? 16 : 12, lineHeight: "17px",
+          padding: "7px 9px", borderRadius: 8, border: "1px solid " + field, outline: "none",
+          background: isDark ? "rgba(255,255,255,.05)" : "#fff", color: "inherit",
+        },
+      }),
+      h("span", { key: "k", style: { fontSize: 10, color: muted } }, "Ctrl+Enter to confirm"),
+    ]);
+
+    const pickerToggle = side
+      ? null
+      : h("button", {
+          key: "pt", type: "button", "aria-expanded": pickerOpen, onClick: () => setPickerOpen(!pickerOpen),
+          style: {
+            cursor: "pointer", display: "flex", alignItems: "center", gap: 6, width: "100%", boxSizing: "border-box",
+            border: "1px solid " + field, borderRadius: 8, padding: "6px 10px", fontSize: 12, fontWeight: 600,
+            background: "transparent", color: "inherit",
+            ...(mobile ? { minHeight: TOUCH_MIN } : {}),
+          },
+        }, [
+          h("span", { key: "l" }, "Change date & time"),
+          h("span", { key: "c", style: { marginLeft: "auto", opacity: 0.6 } }, pickerOpen ? "▴" : "▾"),
+        ]);
+
+    const actions = h("div", { key: "act", style: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: side ? "auto" : 0 } }, [
+      h("button", {
+        key: "ok", type: "button", disabled: busy, onClick: submit,
+        style: actionBtn({ border: "none", fontWeight: 600, color: "#fff", background: "#3b82f6", opacity: busy ? .6 : 1, cursor: busy ? "wait" : "pointer" }),
+      }, busy ? "Scheduling…" : "Confirm"),
+      h("button", {
+        key: "no", type: "button", onClick: () => setOpen(false),
+        style: actionBtn({ border: "1px solid " + field, background: "transparent", color: "inherit", cursor: "pointer" }),
+      }, "Cancel"),
+      error ? h("span", { key: "e", style: { color: "#dc2626", wordBreak: "break-word" } }, error) : null,
+    ]);
+
+    const main = h("div", {
+      key: "main",
+      style: { width: side ? MAIN_W : "auto", boxSizing: "border-box", padding: "12px 14px 14px", display: "flex", flexDirection: "column", gap: 12 },
+    }, [readout, chips, editor, pickerToggle, actions]);
+
+    const extension = side || pickerOpen
+      ? h("div", {
+          key: "ext",
+          style: {
+            width: side ? EXT_W : "auto", boxSizing: "border-box", padding: "12px 14px 14px",
+            borderLeft: side ? "1px solid " + hairline : "none", borderTop: side ? "none" : "1px solid " + hairline,
+            background: isDark ? "rgba(255,255,255,.025)" : "rgba(0,0,0,.018)",
+          },
+        }, h(DateTimePanel, { value: timeValue, onChange: pick, now, isDark, mobile, muted, hairline }))
+      : null;
+
+    return h("div", { ref: wrapRef, "data-plugin": "dsh-schedule-later-button", style: { position: "relative", display: "inline-flex", alignItems: "center", gap: 6 } }, [
+      open
+        ? h("span", { key: "badge", style: { flexShrink: 0 } },
+            h("span", { style: {
+              display: "inline-flex", alignItems: "center", gap: 5, borderRadius: 999,
+              padding: "1px 8px", fontSize: 11, fontWeight: 700,
+              background: "rgba(59,130,246,.16)", color: "#3b82f6",
+            } }, [HourglassIcon(12), h("span", { key: "t" }, "Scheduling…")]))
+        : null,
+      h("button", {
+        key: "alarm", type: "button", className: "dsl-btn", onClick: open ? () => setOpen(false) : openPopover,
+        title: "Schedule send", "aria-label": "Schedule send", "aria-expanded": open, style: btnStyle,
+      }, [StopwatchIcon(14, open ? "spin" : ""), h("span", { key: "l" }, "Schedule")]),
+      open
+        ? h("div", {
+            key: "pop", className: "dsl-pop dsl-motion", style: shell, role: "dialog", "aria-label": "Schedule send",
+            "data-send-at": timeValue, "data-layout": layout,
+            onKeyDown: (e) => { if (e.key === "Escape") setOpen(false); },
+          }, [
+            h(SkyBand, { key: "sky", ms: at, title: "Schedule send" }),
+            h("div", { key: "body", style: { display: "flex", flexDirection: side ? "row" : "column", alignItems: "stretch" } }, [main, extension]),
+          ])
+        : null,
+    ]);
+  }
+
+  /* --- pending-task dock (conversation.input.dock) ---------------------- */
+  function ScheduledDock(props) {
+    const core = props.core;
+    const [, setTick] = React.useState(0);
+    // FIX 2: tri-state user override — null = default policy, 'expanded',
+    // 'collapsed' (manual collapse-all works for ANY count).
+    const [user, setUser] = React.useState(null);
+    const mobile = isMobile();
+    // The pending "Cancel this message?" for the in-chat list.
+    const [ask, setAsk] = React.useState(null);
+    React.useEffect(() => {
+      if (!ask || typeof document === "undefined" || !document.addEventListener) return undefined;
+      const onKey = (e) => { if (e.key === "Escape") { setAsk(null); setTick((n) => n + 1); } };
+      document.addEventListener("keydown", onKey);
+      return () => document.removeEventListener("keydown", onKey);
+    }, [ask]);
+
+    // FIX 1: react to sessionId changes — bind the core to the NEW session
+    // and refresh IMMEDIATELY (no waiting for the next poll tick).
+    React.useEffect(() => {
+      let stopped = false;
+      let timer = null;
+      core.setSession(props.sessionId);
+      const loop = async () => {
+        if (stopped) return;
+        await core.refresh().catch(() => {});
+        if (!stopped) setTick((n) => n + 1);
+        if (!stopped) { timer = setTimeout(loop, 3000); timer.unref?.(); }
+      };
+      void loop();
+      return () => {
+        stopped = true;
+        clearTimeout(timer);
+      };
+    }, [props.sessionId]);
+    // countdown ticker
+    React.useEffect(() => {
+      const t = setInterval(() => setTick((n) => n + 1), 1000);
+      t.unref?.(); // never hold the host loop for a UI countdown
+      return () => clearInterval(t);
+    }, []);
+
+    const tasks = core.visibleTasks();
+    const err = core.lastError();
+    const st = collapseState(tasks, { user, mobile });
+    const isDark = typeof window !== "undefined" && window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+    const now = Date.now();
+    ensureStyles();
+    const visible = tasks.slice(0, st.visibleCount);
+    const showToggle = tasks.length > 0;
+    if (!tasks.length && !err) return null;
+
+    const rowStyle = {
+      display: "flex", flexDirection: "column", gap: 2, width: "100%", maxWidth: "48rem",
+      margin: "2px auto 0", fontSize: 12, lineHeight: "18px",
+      boxSizing: "border-box",
+    };
+    const entryStyle = {
+      display: "flex", flexDirection: "column", gap: 2, padding: "4px 8px", borderRadius: 8,
+      background: "rgba(59,130,246,.10)", border: "1px solid rgba(59,130,246,.22)",
+      maxWidth: "100%", width: "100%", boxSizing: "border-box", overflowWrap: "break-word",
+    };
+    const srcStyle = {
+      margin: 0, whiteSpace: "pre-wrap", fontFamily: "monospace", fontSize: 12,
+      wordBreak: "break-word", maxWidth: "100%",
+    };
+    const metaStyle = { display: "flex", alignItems: "center", gap: 8, color: "rgba(128,128,128,1)", flexWrap: "wrap", maxWidth: "100%" };
+    const cancelBtn = (t) => h("button", {
+      key: "x", type: "button",
+      onClick: () => {
+        setAsk({ ...askFor("cancel", t, ""), onConfirm: () => { core.cancelTask(t.id); } });
+        setTick((n) => n + 1);
+      },
+      style: {
+        cursor: "pointer", border: "1px solid rgba(128,128,128,.4)", borderRadius: 999, padding: "0 8px",
+        fontSize: 11, background: "transparent", color: "inherit", flexShrink: 0,
+        ...(mobile ? { minHeight: TOUCH_MIN } : {}),
+      },
+    }, "Cancel");
+
+    return h("div", { "data-plugin": "dsh-schedule-later-dock", style: rowStyle }, [
+      err
+        ? h("div", {
+            key: "err",
+            style: { padding: "3px 8px", borderRadius: 8, background: "rgba(220,38,38,.10)", color: "#dc2626", wordBreak: "break-word" },
+          }, "⚠ Could not refresh — showing the last list: " + err)
+        : null,
+      showToggle && st.summary
+        ? h("button", {
+            key: "sum", type: "button",
+            onClick: () => { setUser(st.display === "expanded" ? "collapsed" : "expanded"); setTick((n) => n + 1); },
+            style: {
+              cursor: "pointer", alignSelf: "center", border: "1px solid rgba(59,130,246,.35)", borderRadius: 999,
+              padding: "1px 10px", fontSize: 11, fontWeight: 600, background: "rgba(59,130,246,.10)", color: "inherit",
+              ...(mobile ? { minHeight: TOUCH_MIN, boxSizing: "border-box" } : {}),
+            },
+          }, st.summary)
+        : null,
+      // The entries scroll inside a capped box, so an expanded list of long
+      // messages never grows past the toggle above it: "Collapse ⌃" stays on
+      // screen however many are pending.
+      visible.length
+        ? h("div", {
+            key: "list", className: "dsl-dock-list", "data-plugin": "dsh-schedule-later-dock-list",
+            style: {
+              display: "flex", flexDirection: "column", gap: 2, width: "100%",
+              maxHeight: mobile ? "40vh" : "min(40vh, 320px)", overflowY: "auto", overscrollBehavior: "contain",
+            },
+          }, visible.map((t) => {
+            const sky = skyRow(t.sendAt, now);
+            return h("div", { key: t.id, className: sky.className, style: { ...entryStyle, ...sky.style, flex: "none" } }, [
+              h("div", { key: "src", style: srcStyle }, t.content),
+              h("div", { key: "meta", style: metaStyle }, [
+                whenPill(t.sendAt, now, isDark),
+                h("span", { key: "cd" }, sendsIn(t.sendAt, now)),
+                h("span", { key: "sp", style: { marginLeft: "auto" } }, cancelBtn(t)),
+              ]),
+            ]);
+          }))
+        : null,
+      ask ? confirmDialog({ ...ask, isDark, onClose: () => { setAsk(null); setTick((n) => n + 1); } }) : null,
+    ]);
+  }
+
+  /* --- sidebar footer "Scheduled" panel (0.3.0) ------------------------------- */
+  function ScheduledTasksPanel(props) {
+    const core = props.panelCore;
+    const [open, setOpen] = React.useState(false);
+    const [tick, setTick] = React.useState(0);
+    const [hover, setHover] = React.useState(false);
+    const mobile = isMobile();
+    // dsh passes wide: false when the sidebar is collapsed to its icon rail:
+    // show the stopwatch alone then, like Settings does.
+    const wide = props.wide !== false;
+    ensureStyles();
+
+    // Close like a menu: a press anywhere outside the entry and its panel, or
+    // Esc. The panel is position: fixed but still a DOM child of the root, so
+    // one contains() covers both. Capture phase, so a handler elsewhere that
+    // stops propagation cannot keep it open. A click into an iframe (the graft
+    // viz tab, say) never reaches this document; it shows up as the window
+    // losing focus to that iframe, so that closes it too.
+    const rootRef = React.useRef(null);
+    // Row actions: which row is being re-timed, which "Send now" is armed
+    // (a second click sends), which chat's "Cancel all" is asking.
+    const [edit, setEdit] = React.useState(null); // { id, value, error }
+    // The confirmation being asked: { title, note, preview, confirmLabel, danger, onConfirm }.
+    const [ask, setAskState] = React.useState(null);
+    const askRef = React.useRef(null);
+    const setAsk = (v) => { askRef.current = v; setAskState(v); };
+    // The message whose details card is open, by id.
+    const [detail, setDetailState] = React.useState(null);
+    const detailRef = React.useRef(null);
+    const setDetail = (id) => { detailRef.current = id; setDetailState(id); };
+    const [copied, setCopied] = React.useState(false);
+
+    // dsh's sidebar footer is a flex ROW that does not wrap, and every entry
+    // asks for 100% of it, so a second entry is pushed off its right edge.
+    // A CSS rule keyed on the footer's exact nesting broke once dsh's markup
+    // shifted, so this finds the footer from the entry itself: the first
+    // ancestor that actually lays out (display: contents wrappers skipped).
+    // If that is a non-wrapping flex row, it is told to wrap. Re-checked on
+    // every render, so a footer dsh re-creates is fixed again.
+    React.useEffect(() => {
+      const root = rootRef.current;
+      if (!root || typeof getComputedStyle !== "function") return;
+      let el = root.parentElement;
+      for (let i = 0; el && i < 6; i += 1, el = el.parentElement) {
+        const cs = getComputedStyle(el);
+        if (cs.display === "contents") continue;
+        if (/flex/.test(cs.display) && !/column/.test(cs.flexDirection) && cs.flexWrap === "nowrap") {
+          el.style.setProperty("flex-wrap", "wrap", "important");
+        }
+        break;
+      }
+    });
+
+    React.useEffect(() => {
+      if (!open || typeof document === "undefined" || !document.addEventListener) return undefined;
+      const close = () => { setAsk(null); setDetail(null); setEdit(null); setOpen(false); setTick((n) => n + 1); };
+      const onDown = (e) => {
+        const root = rootRef.current;
+        if (root && typeof root.contains === "function" && !root.contains(e.target)) close();
+      };
+      const onKey = (e) => {
+        if (e.key !== "Escape") return;
+        if (askRef.current) { setAsk(null); setTick((n) => n + 1); return; }
+        if (detailRef.current) { setDetail(null); setEdit(null); setTick((n) => n + 1); } else close();
+      };
+      const onBlur = () => {
+        setTimeout(() => { if (document.activeElement && document.activeElement.tagName === "IFRAME") close(); }, 0);
+      };
+      document.addEventListener("pointerdown", onDown, true);
+      document.addEventListener("keydown", onKey);
+      if (typeof window !== "undefined" && window.addEventListener) window.addEventListener("blur", onBlur);
+      return () => {
+        document.removeEventListener("pointerdown", onDown, true);
+        document.removeEventListener("keydown", onKey);
+        if (typeof window !== "undefined" && window.removeEventListener) window.removeEventListener("blur", onBlur);
+      };
+    }, [open]);
+
+    // keep the badge alive even while the panel is closed: poll the FULL
+    // (unfiltered) state — every conversation's pending tasks, 8s cadence.
+    React.useEffect(() => {
+      let stopped = false;
+      let timer = null;
+      const loop = async () => {
+        if (stopped) return;
+        await core.refresh().catch(() => {});
+        if (!stopped) setTick((n) => n + 1);
+        if (!stopped) { timer = setTimeout(loop, 8000); timer.unref?.(); }
+      };
+      void loop();
+      return () => { stopped = true; clearTimeout(timer); };
+    }, []);
+
+    const all = core.visibleTasks(); // ALL sessions, sendAt ascending
+    const err = core.lastError();
+    const MAX_ROWS = 100;
+    const annotated = annotateSessions(all.slice(0, MAX_ROWS), props.sessionById ? props.sessionById() : null);
+    const overflow = Math.max(0, all.length - annotated.length);
+
+    const isDark = typeof window !== "undefined" && window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+    // mirrors usage-stats' footer trigger: same metrics + theme variables as
+    // the system sidebar rows (hover comes from the injected var-only rule)
+    // Settings' own row, measured on the live page: a 50px row holding a 42px
+    // button that runs 2px past the row on each side, padding 0 10px 0 8px.
+    const layerStyle = {
+      flex: "0 0 100%", minWidth: 0, alignItems: "center", height: 50,
+      margin: 0, display: "flex", position: "relative",
+    };
+    const entryBtn = {
+      width: "calc(100% + 4px)", margin: "0 -2px", minWidth: 0, height: 42, boxSizing: "border-box",
+      color: "var(--dsw-alias-label-primary)",
+      cursor: "pointer", background: "0 0", border: "none", borderRadius: 12,
+      alignItems: "center", gap: 8, padding: "0 10px 0 8px", fontFamily: "inherit",
+      fontSize: 14, display: "inline-flex", overflow: "hidden",
+    };
+    const iconBox = { display: "inline-flex", alignItems: "center", flex: "none" };
+    // The collapsed rail's row and button (sized against Settings' on the live page).
+    const collapsedLayer = { display: "flex", justifyContent: "center", alignItems: "center", position: "relative", width: "100%", height: 50 };
+    const collapsedBtn = {
+      position: "relative", width: 36, height: 36, boxSizing: "border-box", padding: 0, border: "none", borderRadius: 10,
+      background: "0 0", color: "var(--dsw-alias-label-primary)", cursor: "pointer",
+      display: "inline-flex", alignItems: "center", justifyContent: "center",
+    };
+
+    const labelStyle = { textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0, overflow: "hidden" };
+    const amountStyle = {
+      color: "var(--dsw-alias-label-secondary)", fontVariantNumeric: "tabular-nums",
+      flex: "none", fontSize: 12, fontWeight: 600, lineHeight: "16px",
+    };
+    const countStyle = {
+      color: "var(--dsw-alias-label-tertiary)", fontVariantNumeric: "tabular-nums",
+      flex: "none", marginLeft: "auto", fontSize: 12, lineHeight: "16px",
+    };
+    const badge = (n) => h("span", {
+      key: "b", "data-badge": n,
+      style: {
+        display: "inline-flex", alignItems: "center", justifyContent: "center",
+        minWidth: 16, height: 16, padding: "0 4px", borderRadius: 999,
+        background: "#3b82f6", color: "#fff", fontSize: 10, fontWeight: 700,
+      },
+    }, String(n));
+
+    const jump = (t) => {
+      // failure mode: jump unavailable/unknown session → keep the panel open,
+      // keep the row (still cancellable); never throw into the click handler.
+      const ok = props.openSession ? props.openSession(t.conversationId) : false;
+      if (ok) setOpen(false);
+    };
+    const confirmSend = (t) => setAsk({
+      ...askFor("send", t, t.sessionExists ? t.sessionTitle : ""),
+      onConfirm: () => { if (detailRef.current === t.id) setDetail(null); core.rescheduleTask(t.id, "now").catch(() => {}); },
+    });
+    const confirmCancel = (t) => setAsk({
+      ...askFor("cancel", t, t.sessionExists ? t.sessionTitle : ""),
+      onConfirm: () => { if (detailRef.current === t.id) setDetail(null); core.cancelTask(t.id).catch(() => {}); },
+    });
+    const cancelBtn = (t) => h("button", {
+      key: "x", type: "button",
+      onClick: (e) => {
+        if (e && typeof e.stopPropagation === "function") e.stopPropagation();
+        confirmCancel(t);
+        setTick((n) => n + 1);
+      },
+      style: {
+        cursor: "pointer", border: "1px solid rgba(128,128,128,.4)", borderRadius: 999,
+        padding: "0 8px", fontSize: 11, background: "transparent", color: "inherit", flexShrink: 0,
+        ...(mobile ? { minHeight: TOUCH_MIN, boxSizing: "border-box" } : {}),
+      },
+    }, "Cancel");
+
+    const stop = (e) => { if (e && typeof e.stopPropagation === "function") e.stopPropagation(); };
+    const smallBtn = (key, label, onClick, extra) => h("button", {
+      key, type: "button", onClick: (e) => { stop(e); onClick(); setTick((n) => n + 1); },
+      style: {
+        cursor: "pointer", border: "1px solid rgba(128,128,128,.4)", borderRadius: 999, padding: "0 8px",
+        fontSize: 11, lineHeight: "18px", background: "transparent", color: "inherit", flexShrink: 0, whiteSpace: "nowrap",
+        ...(mobile ? { minHeight: TOUCH_MIN, boxSizing: "border-box" } : {}),
+        ...(extra || {}),
+      },
+    }, label);
+    const iconBtn = (key, title, glyph, onClick) => h("button", {
+      key, type: "button", "aria-label": title, "data-tip": title, className: "dsl-row-act dsl-tip",
+      onClick: (e) => { stop(e); onClick(); setTick((n) => n + 1); },
+      style: {
+        cursor: "pointer", border: "none", borderRadius: 6, width: 22, height: 20, padding: 0,
+        display: "inline-flex", alignItems: "center", justifyContent: "center",
+        background: "transparent", color: "inherit", opacity: .75, flexShrink: 0,
+        ...(mobile ? { minHeight: TOUCH_MIN, minWidth: TOUCH_MIN } : {}),
+      },
+    }, glyph);
+
+    /** Pending rows by chat, chats in order of their soonest message. */
+    function groupByChat(rows) {
+      const groups = [];
+      const byKey = new Map();
+      for (const t of rows) {
+        const key = t.sessionExists ? String(t.conversationId) : "gone:" + String(t.conversationId || "");
+        let g = byKey.get(key);
+        if (!g) {
+          g = { key, title: t.sessionTitle, exists: !!t.sessionExists, tasks: [] };
+          byKey.set(key, g);
+          groups.push(g);
+        }
+        g.tasks.push(t);
+      }
+      return groups;
+    }
+
+    /** "Cancel all" for one chat, through the confirmation dialog. */
+    function cancelAllCtl(g) {
+      return smallBtn("ca", "Cancel all", () => setAsk({
+        title: "Cancel all " + g.tasks.length + " scheduled messages?",
+        note: "None of them will be sent" + (g.exists ? " to \u201c" + g.title + "\u201d" : "") + ". This can\u2019t be undone.",
+        preview: g.tasks.map((t) => "\u2022 " + String(t.content).split(/\r?\n/, 1)[0]).join("\n"),
+        confirmLabel: "Cancel " + g.tasks.length + " messages", keepLabel: "Keep them", danger: true,
+        onConfirm: () => {
+          if (g.tasks.some((t) => t.id === detailRef.current)) setDetail(null);
+          for (const t of g.tasks) core.cancelTask(t.id).catch(() => {});
+        },
+      }), { marginLeft: "auto" });
+    }
+
+    /** A chat's rows, with a day heading wherever the day changes (Today needs none). */
+    function groupRows(g) {
+      const nowMs = Date.now();
+      const out = [];
+      let prev = null;
+      for (const t of g.tasks) {
+        const day = shortDay(t.sendAt, nowMs);
+        if (day !== prev && (prev !== null || day !== "Today")) {
+          out.push(h("div", {
+            key: "d:" + t.id, "data-day": day,
+            style: { fontSize: 10.5, fontWeight: 700, letterSpacing: ".4px", textTransform: "uppercase", opacity: .55, margin: "6px 2px 3px" },
+          }, day));
+        }
+        prev = day;
+        out.push(taskRow(t, nowMs));
+      }
+      return out;
+    }
+
+    const saveEdit = (t) => {
+      const at = edit ? new Date(edit.value).getTime() : NaN;
+      if (!Number.isFinite(at) || at <= Date.now()) {
+        setEdit({ ...edit, error: "Pick a time in the future." });
+        return;
+      }
+      setEdit(null);
+      core.rescheduleTask(t.id, at).catch(() => {});
+    };
+
+    function editRow(t) {
+      return h("div", { key: "e", onClick: stop, style: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" } }, [
+        h("input", {
+          key: "i", type: "datetime-local", value: edit.value, "aria-label": "New send time",
+          min: toLocalInput(Date.now() + 60_000),
+          onChange: (e) => { setEdit({ ...edit, id: t.id, value: e.target.value, error: null }); setTick((n) => n + 1); },
+          onKeyDown: (e) => {
+            if (e.key === "Enter") saveEdit(t);
+            if (e.key === "Escape") { stop(e); setEdit(null); }
+            setTick((n) => n + 1);
+          },
+          style: {
+            font: "inherit", fontSize: 12, padding: "2px 6px", borderRadius: 6, border: "1px solid rgba(128,128,128,.4)",
+            background: "transparent", color: "inherit", colorScheme: isDark ? "dark" : "light", minWidth: 0,
+          },
+        }),
+        smallBtn("sv", "Save", () => saveEdit(t), { border: "none", background: "#3b82f6", color: "#fff", fontWeight: 700 }),
+        smallBtn("bk", "Back", () => setEdit(null)),
+        edit.error ? h("span", { key: "er", style: { color: "#dc2626", width: "100%" } }, edit.error) : null,
+      ]);
+    }
+
+    function taskRow(t, nowMs) {
+      const sky = skyRow(t.sendAt, nowMs);
+      const editing = !!(edit && edit.id === t.id && edit.where !== "detail");
+      return h("div", {
+        key: t.id, "data-task": t.id, className: sky.className,
+        onClick: () => { if (!editing) { setDetail(detail === t.id ? null : t.id); setTick((n) => n + 1); } },
+        "aria-expanded": detail === t.id,
+        style: {
+          display: "flex", flexDirection: "column", gap: 3, padding: "6px 8px", marginBottom: 4,
+          borderRadius: 8, ...sky.style,
+          ...(detail === t.id ? { boxShadow: "0 0 0 2px #3b82f6" } : {}),
+          cursor: "pointer",
+          opacity: t.sessionExists ? 1 : 0.5,
+          maxWidth: "100%", boxSizing: "border-box",
+        },
+      }, [
+        // The whole message, clamped to two lines; hover shows all of it.
+        h("div", {
+          key: "c", "data-content": "",
+          style: {
+            whiteSpace: "pre-wrap", fontFamily: "monospace", wordBreak: "break-word",
+            display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden",
+          },
+        }, t.content || "(empty)"),
+        editing
+          ? editRow(t)
+          : h("div", { key: "m", style: { display: "flex", alignItems: "center", gap: 6, minWidth: 0 } }, [
+              whenPill(t.sendAt, nowMs, isDark, { day: false }),
+              h("span", { key: "cd", style: { color: "#3b82f6", fontWeight: 600, display: "inline-flex", alignItems: "center", gap: 4, minWidth: 0, overflow: "hidden", whiteSpace: "nowrap" } },
+                [HourglassIcon(11), h("span", { key: "t" }, sendsIn(t.sendAt, nowMs))]),
+              h("span", { key: "sp", style: { marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 2, flex: "none" } }, [
+                iconBtn("sn", "Send now", SendGlyph(13), () => { setEdit(null); confirmSend(t); }),
+                iconBtn("ed", "Change time", ClockGlyph(13), () => setEdit({ id: t.id, value: toLocalInput(t.sendAt), error: null, where: "row" })),
+                cancelBtn(t),
+              ]),
+            ]),
+      ]);
+    }
+
+    /** "Saturday 27 September 2026, 2:35 AM" in the browser's locale. */
+    const longWhen = (ms) => new Date(ms).toLocaleString(undefined, {
+      weekday: "long", day: "numeric", month: "long", year: "numeric", hour: "numeric", minute: "2-digit",
+    });
+    const ago = (ms) => {
+      const m = Math.round((Date.now() - ms) / 60_000);
+      if (!Number.isFinite(m)) return "";
+      if (m < 1) return "just now";
+      if (m < 60) return m + " min ago";
+      const hrs = Math.round(m / 60);
+      return hrs < 48 ? hrs + " h ago" : Math.round(hrs / 24) + " days ago";
+    };
+
+    function detailCard() {
+      const t = annotated.find((x) => x.id === detail);
+      if (!t) return null;
+      const nowMs = Date.now();
+      const byAssistant = t.meta && t.meta.scheduledBy === "assistant";
+      const editingHere = !!(edit && edit.id === t.id && edit.where === "detail");
+      const narrow = mobile || (typeof window !== "undefined" && window.innerWidth < 760);
+      const surface = isDark ? "#1c1c1e" : "#fff";
+      const hair = isDark ? "rgba(255,255,255,.14)" : "rgba(0,0,0,.10)";
+      const label = (key, text) => h("div", { key, style: { fontSize: 10.5, fontWeight: 700, letterSpacing: ".4px", textTransform: "uppercase", opacity: .55, margin: "10px 0 4px" } }, text);
+      const copy = () => {
+        try {
+          const done = () => { setCopied(true); setTick((n) => n + 1); setTimeout(() => { setCopied(false); setTick((n) => n + 1); }, 1500); };
+          if (typeof navigator !== "undefined" && navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t.content).then(done, () => {});
+        } catch { /* no clipboard: nothing to do */ }
+      };
+      return h("div", {
+        key: "detail", "data-plugin": "dsh-schedule-later-detail", role: "dialog", "aria-label": "Scheduled message details",
+        className: "dsl-pop",
+        onClick: stop,
+        style: {
+          // Beside the list on a wide window; over it on a narrow one.
+          position: "fixed", bottom: 56, zIndex: 51,
+          left: narrow ? (mobile ? 8 : (wide ? 12 : 64)) : (wide ? 12 : 64) + 340 + 8,
+          width: mobile ? "calc(100vw - 16px)" : 380, maxWidth: "calc(100vw - 24px)", maxHeight: "70vh",
+          display: "flex", flexDirection: "column", boxSizing: "border-box",
+          borderRadius: 12, border: "1px solid " + hair, background: surface, color: isDark ? "#eee" : "#111",
+          boxShadow: "0 12px 32px rgba(0,0,0,.28)", fontSize: 12, overflow: "hidden",
+        },
+      }, [
+        // the sky of the send time, as a header band
+        h("div", { key: "hd", className: skyRow(t.sendAt, nowMs).className, style: { ...skyRow(t.sendAt, nowMs).style, borderRadius: 0, border: "none", padding: "10px 12px", display: "flex", alignItems: "center", gap: 8 } }, [
+          whenPill(t.sendAt, nowMs, isDark),
+          h("span", { key: "cd", style: { color: "#3b82f6", fontWeight: 600, display: "inline-flex", alignItems: "center", gap: 4 } }, [HourglassIcon(11), h("span", { key: "t" }, sendsIn(t.sendAt, nowMs))]),
+          h("button", {
+            key: "x", type: "button", "aria-label": "Close details", onClick: (e) => { stop(e); setDetail(null); setEdit(null); setTick((n) => n + 1); },
+            style: { cursor: "pointer", marginLeft: "auto", border: "none", background: "transparent", color: "inherit", fontSize: 14, lineHeight: 1 },
+          }, "✕"),
+        ]),
+        h("div", { key: "body", className: "dsl-dock-list", style: { padding: "2px 12px 10px", overflowY: "auto", minHeight: 0 } }, [
+          h("div", { key: "when", style: { marginTop: 8, fontWeight: 600 } }, longWhen(t.sendAt)),
+          h("div", { key: "who", style: { marginTop: 4, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", opacity: .8 } }, [
+            h("span", {
+              key: "b", style: {
+                padding: "0 7px", borderRadius: 999, fontSize: 11, fontWeight: 700, lineHeight: "18px",
+                background: byAssistant ? "rgba(168,85,247,.18)" : "rgba(59,130,246,.16)", color: byAssistant ? "#c084fc" : "#60a5fa",
+              },
+            }, byAssistant ? "Scheduled by the assistant" : "Scheduled by you"),
+            t.createdAt ? h("span", { key: "c", title: formatLocalTime(t.createdAt) }, ago(t.createdAt)) : null,
+          ]),
+
+          label("lc", "Chat"),
+          h("div", { key: "chat", style: { display: "flex", alignItems: "center", gap: 8, minWidth: 0 } }, [
+            h("span", { key: "t", style: { fontWeight: 600, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", opacity: t.sessionExists ? 1 : .6 } },
+              t.sessionExists ? t.sessionTitle : "Chat no longer exists"),
+            t.sessionExists ? smallBtn("open", "Open chat", () => jump(t), { marginLeft: "auto" }) : null,
+          ]),
+
+          h("div", { key: "lm", style: { display: "flex", alignItems: "center", margin: "10px 0 4px" } }, [
+            h("span", { key: "l", style: { fontSize: 10.5, fontWeight: 700, letterSpacing: ".4px", textTransform: "uppercase", opacity: .55 } }, "Message"),
+            h("span", { key: "n", style: { opacity: .45, marginLeft: 6 } }, t.content.length.toLocaleString() + " chars"),
+            smallBtn("cp", copied ? "Copied" : "Copy", copy, { marginLeft: "auto" }),
+          ]),
+          h("pre", {
+            key: "msg", "data-detail-content": "", className: "dsl-dock-list",
+            style: {
+              margin: 0, padding: "8px 10px", borderRadius: 8, maxHeight: "32vh", overflow: "auto",
+              background: isDark ? "rgba(255,255,255,.04)" : "rgba(0,0,0,.035)", border: "1px solid " + hair,
+              whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "monospace", fontSize: 12, lineHeight: "18px",
+            },
+          }, t.content),
+          byAssistant
+            ? h("div", { key: "mk", style: { marginTop: 6, opacity: .6 } }, "It arrives starting with [Scheduled by the assistant], so it is never mistaken for you typing.")
+            : null,
+          t.attempts > 0 || t.lastError
+            ? h("div", { key: "err", style: { marginTop: 8, padding: "6px 8px", borderRadius: 8, background: "rgba(245,158,11,.12)", color: isDark ? "#fcd34d" : "#b45309", wordBreak: "break-word" } },
+                "Delivery tried " + (t.attempts || 0) + " time" + (t.attempts === 1 ? "" : "s") + (t.lastError ? " — last error: " + t.lastError : "") + ". It will try again.")
+            : null,
+        ]),
+
+        // actions
+        h("div", { key: "ft", style: { borderTop: "1px solid " + hair, padding: "8px 12px", display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" } },
+          editingHere
+            ? [editRow(t)]
+            : [
+                smallBtn("sn", "Send now", () => confirmSend(t)),
+                smallBtn("ed", "Change time", () => setEdit({ id: t.id, value: toLocalInput(t.sendAt), error: null, where: "detail" })),
+                smallBtn("cx", "Cancel message", () => confirmCancel(t),
+                  { marginLeft: "auto", color: "#ef4444", borderColor: "rgba(239,68,68,.45)" }),
+              ]),
+      ]);
+    }
+
+    const footer = open
+      ? h("div", {
+          key: "panel", "data-plugin": "dsh-schedule-later-sidebar-panel",
+          style: {
+            // Beside the collapsed rail rather than over it.
+            position: "fixed", bottom: 56, left: wide ? 12 : 64, zIndex: 50,
+            width: 340, maxWidth: "calc(100vw - 24px)", maxHeight: "70vh", overflowY: "auto",
+            boxSizing: "border-box", padding: "10px 12px", fontSize: 12,
+            borderRadius: 12, border: "1px solid " + (isDark ? "rgba(255,255,255,.14)" : "rgba(0,0,0,.10)"),
+            background: isDark ? "#1c1c1e" : "#fff",
+            boxShadow: "0 8px 24px rgba(0,0,0,.18)",
+            color: isDark ? "#eee" : "#111",
+            ...(mobile ? { left: 8, width: "calc(100vw - 16px)", maxWidth: "calc(100vw - 16px)" } : {}),
+          },
+        }, [
+          h("div", {
+            key: "head", style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 6 },
+          }, [
+            h("span", { key: "t", style: { fontWeight: 700, fontSize: 13, display: "inline-flex", alignItems: "center", gap: 6 } }, [StopwatchIcon(14), h("span", { key: "l" }, "Scheduled")]),
+            h("span", { key: "n", style: { opacity: .6 } }, all.length ? `${all.length} pending` : ""),
+            h("button", {
+              key: "close", type: "button", onClick: () => setOpen(false),
+              style: { cursor: "pointer", marginLeft: "auto", border: "none", background: "transparent", color: "inherit", fontSize: 14, lineHeight: 1 },
+            }, "✕"),
+          ]),
+          err
+            ? h("div", {
+                key: "err",
+                style: { padding: "3px 8px", borderRadius: 8, background: "rgba(220,38,38,.10)", color: "#dc2626", wordBreak: "break-word" },
+              }, "⚠ Could not refresh — showing the last list: " + err)
+            : null,
+          !all.length && !err
+            ? h("div", { key: "empty", style: { padding: "18px 0", textAlign: "center", opacity: .6 } }, [
+                h("div", { key: "l1" }, "No scheduled messages"),
+                h("div", { key: "l2", style: { marginTop: 4 } }, "Click Schedule in a chat's message box to create one"),
+              ])
+            : null,
+          groupByChat(annotated).map((g) => h("div", { key: "g:" + g.key, "data-group": g.key, style: { marginBottom: 6 } }, [
+            h("div", { key: "hd", style: { display: "flex", alignItems: "center", gap: 6, padding: "4px 2px", minWidth: 0 } }, [
+              h("button", {
+                key: "t", type: "button",
+                onClick: () => { if (g.exists) jump(g.tasks[0]); },
+                title: g.exists ? "Open this chat" : "Chat no longer exists — its messages can only be cancelled",
+                style: {
+                  cursor: g.exists ? "pointer" : "default", border: "none", background: "transparent", color: "inherit",
+                  padding: 0, font: "inherit", fontWeight: 700, textAlign: "left", opacity: g.exists ? 1 : .6,
+                  minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                },
+              }, g.exists ? g.title : "Chat no longer exists"),
+              h("span", { key: "n", style: { opacity: .5, flex: "none" } }, String(g.tasks.length)),
+              g.tasks.length > 1 ? cancelAllCtl(g) : null,
+            ]),
+            ...groupRows(g),
+          ])),
+          overflow > 0
+            ? h("div", { key: "more", style: { textAlign: "center", opacity: .6, padding: "4px 0" } },
+                `Showing the next ${annotated.length} of ${all.length}`)
+            : null,
+        ])
+      : null;
+
+    const toggle = () => { setOpen(!open); setTick((n) => n + 1); };
+    const hoverCss = h("style", { key: "css" }, '.ssb_badge:hover{background:var(--dsw-alias-interactive-bg-hover-solid)}');
+
+    if (!wide) {
+      // Collapsed rail: the stopwatch alone, the count as a small corner badge.
+      return h("div", { ref: rootRef, "data-plugin": "dsh-schedule-later-sidebar", style: collapsedLayer }, [
+        hoverCss,
+        h("button", {
+          key: "btn", type: "button", className: "ssb_badge", onClick: toggle,
+          title: all.length ? `Scheduled messages (${all.length})` : "Scheduled messages",
+          "aria-label": "Scheduled messages", style: collapsedBtn,
+        }, [
+          h("span", { key: "i", style: iconBox }, StopwatchIcon(16, all.length ? "slow" : "")),
+          all.length
+            ? h("span", {
+                key: "b", "data-badge": all.length,
+                style: {
+                  position: "absolute", top: 1, right: 1, minWidth: 14, height: 14, padding: "0 3px", boxSizing: "border-box",
+                  borderRadius: 999, background: "#3b82f6", color: "#fff", fontSize: 9, fontWeight: 700, lineHeight: "14px", textAlign: "center",
+                },
+              }, all.length > 99 ? "99+" : String(all.length))
+            : null,
+        ]),
+        footer,
+        open && detail ? detailCard() : null,
+        open && ask ? confirmDialog({ ...ask, isDark, onClose: () => { setAsk(null); setTick((n) => n + 1); } }) : null,
+      ]);
+    }
+
+    return h("div", { ref: rootRef, "data-plugin": "dsh-schedule-later-sidebar", style: layerStyle }, [
+      hoverCss,
+      h("button", {
+        key: "btn", type: "button",
+        className: "ssb_badge",
+        onClick: toggle,
+        title: "Scheduled messages", "aria-label": "Scheduled messages", style: entryBtn,
+      }, [
+        // ticks slowly while anything is waiting to be sent
+        h("span", { key: "i", style: iconBox }, StopwatchIcon(16, all.length ? "slow" : "")),
+        h("span", { key: "l", style: labelStyle }, "Scheduled"),
+        all.length ? badge(all.length) : null,
+      ]),
+      footer,
+      open && detail ? detailCard() : null,
+      open && ask ? confirmDialog({ ...ask, isDark, onClose: () => { setAsk(null); setTick((n) => n + 1); } }) : null,
+    ]);
+  }
+
+  /** Client plugin body. Returns the cordis plugin ({inject, apply}). */
+  return function buildPlugin({ stateRoutePath, fetchImpl }) {
+    const schedulePath = stateRoutePath.replace(/\/state$/, "/schedule");
+    const doFetch = fetchImpl || ((...a) => fetch(...a));
+
+    let currentSessionId = null;
+
+    const doCancel = async (id) => {
+      const res = await doFetch(schedulePath + "?id=" + encodeURIComponent(id), { method: "DELETE" });
+      return res.ok;
+    };
+    // PATCH moves a pending task; when === "now" sends it at once.
+    const doReschedule = async (id, when) => {
+      const res = await doFetch(schedulePath + "?id=" + encodeURIComponent(id), {
+        method: "PATCH", headers: { "content-type": "application/json", accept: "application/json" },
+        body: JSON.stringify(when === "now" ? { now: true } : { sendAt: when }),
+      });
+      return res.ok;
+    };
+
+    // 0.3.0 panel core: UNBOUND (session null) — fetches the FULL task list
+    // (no conversationId filter) for the sidebar badge + panel; cancel reuses
+    // the same DELETE route (cross-conversation).
+    const panelCore = createScheduledClientState({
+      fetchState: async () => {
+        const res = await doFetch(stateRoutePath, { headers: { accept: "application/json" } });
+    // cross-instance sync: a cancel/create in either surface refreshes the
+    // other immediately (no 4s poll lag)
+    core.onChanged = (id) => { if (id) panelCore.removeTask(id); void panelCore.refresh(); };
+    panelCore.onChanged = () => { void core.refresh(); };
+        if (!res.ok) throw new Error("state HTTP " + res.status);
+        return res.json();
+      },
+      cancelSchedule: doCancel,
+      rescheduleSchedule: doReschedule,
+    });
+    panelCore.setSession(null);
+
+    const core = createScheduledClientState({
+      fetchState: async () => {
+        // ask the host for THIS conversation's view (the core's bound session
+        // is authoritative — the view binds it before every refresh); the
+        // core still filters strictly client-side against stale caches.
+        const sid = core.currentSession();
+        const q = sid ? "?conversationId=" + encodeURIComponent(sid) : "";
+        const res = await doFetch(stateRoutePath + q, { headers: { accept: "application/json" } });
+        if (!res.ok) throw new Error("state HTTP " + res.status);
+        return res.json();
+      },
+      postSchedule: async (payload) => {
+        const res = await doFetch(schedulePath, {
+          method: "POST", headers: { "content-type": "application/json", accept: "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(body.error || ("HTTP " + res.status));
+        return body;
+      },
+      cancelSchedule: async (id) => {
+        const res = await doFetch(schedulePath + "?id=" + encodeURIComponent(id), { method: "DELETE" });
+        return res.ok;
+      },
+    });
+    core.defaultSendAt = () => defaultSendAt();
+
+    const inject = ["slots", "sessions"]; // sessions: sidebar panel jump (0.3.0)
+    function apply(ctx) {
+      // due-time delivery: refresh the sidebar panel the moment a task fires
+      ctx.on?.('guard/scheduled-due', () => { void panelCore.refresh(); });
+      ctx.on?.('guard/scheduled-dropped', () => { void panelCore.refresh(); });
+      ctx.inject(inject, (scope) => {
+        // 0.3.0 session navigation, sourced from the sessions service:
+        //  - open(id) selects a session as current (unknown ids throw → false)
+        //  - list.getSnapshot().byId maps id → {displayTitle} for row labels
+        const svc = scope.sessions;
+        const openSession = (sid) => {
+          try {
+            if (svc && typeof svc.open === "function" && sid) { svc.open(sid); return true; }
+          } catch (err) { /* unknown session — degrade, row stays cancellable */ }
+          return false;
+        };
+        const sessionById = () => {
+          try { return (svc && svc.list && svc.list.getSnapshot && svc.list.getSnapshot().byId) || {}; }
+          catch (err) { return {}; }
+        };
+        scope.slots.inject("sidebar.footer.action", () => scope.slots.register({
+          name: "sidebar.footer.action",
+          id: "dsh-schedule-later",
+          order: 20,
+        }, (slotProps) => ScheduledTasksPanel({ ...(slotProps || {}), panelCore, openSession, sessionById })));
+        scope.slots.inject("conversation.input.right", () => scope.slots.register({
+          name: "conversation.input.right",
+          id: "dsh-schedule-later",
+          order: 100,
+          inject: (sessionId) => {
+            currentSessionId = sessionId;
+            core.setSession(sessionId); // dock/button are conversation-scoped
+            return { sessionId, core, onTaskCreated: () => panelCore.refresh() };
+          },
+        }, ScheduleButton));
+        scope.slots.inject("conversation.input.dock", () => scope.slots.register({
+          name: "conversation.input.dock",
+          id: "dsh-schedule-later",
+          // The dock stacks by order, top to bottom: dsh's To-dos are 0, the
+          // goal 10, the queue 20. Above all of them, so the To-dos stay
+          // next to the message box.
+          order: -10,
+          inject: (sessionId) => {
+            currentSessionId = sessionId;
+            core.setSession(sessionId);
+            return { sessionId, core, onTaskCreated: () => panelCore.refresh() };
+          },
+        }, ScheduledDock));
+      });
+    }
+    return { core, inject, apply };
+  };
+}
