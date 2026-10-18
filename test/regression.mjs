@@ -11,6 +11,13 @@
 //   t3  settle-before-remove (in-flight flag 'delivering' + startedAt
 //       persisted before await; item removed only after delivery settles;
 //       crash-on-disk 'delivering' restore re-queues → at-least-once).
+//   t4  generated lib/client.js registers exactly the package.json name
+//       (INC-2026-10-18: a bundle built under a pre-rename name executes but
+//       never registers the awaited loader row → web boot fails).
+//
+// CLI: `node test/regression.mjs <bundle.js>` runs ONLY the t4 registration
+// assertion against an arbitrary bundle (e.g. the pre-fix backup copy, where
+// it must FAIL).
 
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
@@ -93,6 +100,34 @@ function noLiveAgentErr() {
 
 function readItems(dataDir) {
   return JSON.parse(readFileSync(join(dataDir, 'tasks.json'), 'utf8')).items;
+}
+
+// t4 (INC-2026-10-18): the DSH web loader keys browser boot rows by npm
+// package name, so the generated lib/client.js must call
+// window.__ModuleLoader__.load( exactly once and register exactly that name.
+function checkRegistrationIdMatchesPackage(bundlePath, pkgName) {
+  const src = readFileSync(bundlePath, 'utf8');
+  const loads = src.match(/window\.__ModuleLoader__\.load\(/g) || [];
+  assert.equal(loads.length, 1, `exactly one window.__ModuleLoader__.load( call (found ${loads.length})`);
+  const escaped = pkgName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const reg = src.match(new RegExp('window\\.__ModuleLoader__\\.load\\(\\{\\s*id:\\s*"(' + escaped + ')"'));
+  assert.ok(reg, `registration id must equal package name "${pkgName}"`);
+  // stale-registration guard (negative lookahead: not the hardened name)
+  const stale = src.match(/window\.__ModuleLoader__\.load\(\{\s*id:\s*"dsh-schedule-later"(?!-hardened)/g) || [];
+  assert.equal(stale.length, 0, 'no registration under the pre-rename id "dsh-schedule-later"');
+}
+
+if (process.argv[2]) {
+  const target = process.argv[2];
+  const pkgName = JSON.parse(readFileSync(join(HERE, '..', 'package.json'), 'utf8')).name;
+  try {
+    checkRegistrationIdMatchesPackage(target, pkgName);
+    console.log(`REGISTRATION CHECK (external bundle ${target}): PASS`);
+    process.exit(0);
+  } catch (err) {
+    console.log(`REGISTRATION CHECK (external bundle ${target}): FAIL — ${err.message}`);
+    process.exit(1);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -324,6 +359,13 @@ await okAsync('t3.3 crash-on-disk (status delivering) restore re-queues as pendi
   assert.ok(delivered, 're-delivered after restore (at-least-once)');
   await sched.dispose();
   await rm(dir, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------------------
+console.log('t4: generated client bundle registration id (INC-2026-10-18)');
+await okAsync('t4.1 lib/client.js has exactly one __ModuleLoader__.load( registering the package.json name', async () => {
+  const pkgName = JSON.parse(readFileSync(join(HERE, '..', 'package.json'), 'utf8')).name;
+  checkRegistrationIdMatchesPackage(join(HERE, '..', 'lib', 'client.js'), pkgName);
 });
 
 // ---------------------------------------------------------------------------
